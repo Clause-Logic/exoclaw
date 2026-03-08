@@ -2,7 +2,7 @@
 
 from typing import Protocol, runtime_checkable
 
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from exoclaw.bus.events import InboundMessage, OutboundMessage
 
 
 @runtime_checkable

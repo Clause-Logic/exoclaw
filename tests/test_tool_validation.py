@@ -1,7 +1,7 @@
 from typing import Any
 
-from nanobot.agent.tools.protocol import ToolBase as Tool
-from nanobot.agent.tools.registry import ToolRegistry
+from exoclaw.agent.tools.protocol import ToolBase as Tool
+from exoclaw.agent.tools.registry import ToolRegistry
 
 
 class SampleTool(Tool):

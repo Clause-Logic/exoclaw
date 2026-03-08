@@ -9,12 +9,12 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
-from nanobot.agent.conversation import Conversation
-from nanobot.agent.tools.protocol import Tool
-from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.bus.events import InboundMessage, OutboundMessage
-from nanobot.bus.protocol import Bus
-from nanobot.providers.protocol import LLMProvider
+from exoclaw.agent.conversation import Conversation
+from exoclaw.agent.tools.protocol import Tool
+from exoclaw.agent.tools.registry import ToolRegistry
+from exoclaw.bus.events import InboundMessage, OutboundMessage
+from exoclaw.bus.protocol import Bus
+from exoclaw.providers.protocol import LLMProvider
 
 
 class AgentLoop:

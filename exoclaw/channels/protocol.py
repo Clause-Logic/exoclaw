@@ -2,10 +2,10 @@
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from nanobot.bus.events import OutboundMessage
+from exoclaw.bus.events import OutboundMessage
 
 if TYPE_CHECKING:
-    from nanobot.bus.protocol import Bus
+    from exoclaw.bus.protocol import Bus
 
 
 @runtime_checkable

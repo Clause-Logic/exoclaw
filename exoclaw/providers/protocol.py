@@ -2,7 +2,7 @@
 
 from typing import Any, Protocol, runtime_checkable
 
-from nanobot.providers.types import LLMResponse
+from exoclaw.providers.types import LLMResponse
 
 
 @runtime_checkable

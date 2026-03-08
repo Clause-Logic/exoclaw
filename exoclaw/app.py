@@ -21,14 +21,14 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from nanobot.agent.conversation import Conversation
-from nanobot.agent.tools.protocol import Tool
-from nanobot.bus.protocol import Bus
-from nanobot.channels.manager import ChannelManager
-from nanobot.channels.protocol import Channel
+from exoclaw.agent.conversation import Conversation
+from exoclaw.agent.tools.protocol import Tool
+from exoclaw.bus.protocol import Bus
+from exoclaw.channels.manager import ChannelManager
+from exoclaw.channels.protocol import Channel
 
 if TYPE_CHECKING:
-    from nanobot.providers.protocol import LLMProvider
+    from exoclaw.providers.protocol import LLMProvider
 
 
 class Nanobot:
@@ -63,12 +63,12 @@ class Nanobot:
 
     def _build(self):
         """Instantiate all internal components. Called once at run time."""
-        from nanobot.agent.loop import AgentLoop
+        from exoclaw.agent.loop import AgentLoop
 
         if self.bus is not None:
             bus = self.bus
         else:
-            from nanobot.bus.queue import MessageBus
+            from exoclaw.bus.queue import MessageBus
             bus = MessageBus()
 
         model = self.model or self.provider.get_default_model()

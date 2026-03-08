@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from nanobot.agent.tools.protocol import Tool
+from exoclaw.agent.tools.protocol import Tool
 
 
 class ToolRegistry:

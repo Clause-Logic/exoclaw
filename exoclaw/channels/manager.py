@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 from loguru import logger
 
-from nanobot.bus.events import OutboundMessage
-from nanobot.bus.protocol import Bus
-from nanobot.channels.protocol import Channel
+from exoclaw.bus.events import OutboundMessage
+from exoclaw.bus.protocol import Bus
+from exoclaw.channels.protocol import Channel
 
 
 class ChannelManager:

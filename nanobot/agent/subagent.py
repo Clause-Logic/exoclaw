@@ -13,7 +13,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
-from nanobot.bus.queue import MessageBus
+from nanobot.bus.protocol import Bus
 from nanobot.config.schema import ExecToolConfig
 from nanobot.providers.base import LLMProvider
 
@@ -25,7 +25,7 @@ class SubagentManager:
         self,
         provider: LLMProvider,
         workspace: Path,
-        bus: MessageBus,
+        bus: Bus,
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,

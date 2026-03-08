@@ -407,7 +407,7 @@ def agent(
     from loguru import logger
 
     from nanobot.agent.loop import AgentLoop
-    from nanobot.bus.queue import MessageBus
+    from nanobot.bus.queue import MessageBus  # noqa: TID251 — cli default
     from nanobot.config.paths import get_cron_dir
     from nanobot.cron.service import CronService
 

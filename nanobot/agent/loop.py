@@ -105,6 +105,19 @@ class AgentLoop:
             if hasattr(tool, "on_inbound"):
                 tool.on_inbound(msg)
 
+    def _collect_plugin_context(self) -> list[str]:
+        """Collect system_context() strings from tools that provide them."""
+        ctx = []
+        for tool in self.tools._tools.values():
+            if hasattr(tool, "system_context"):
+                try:
+                    result = tool.system_context()
+                    if result and isinstance(result, str):
+                        ctx.append(result)
+                except Exception:
+                    logger.exception("Error collecting system_context from tool {}", getattr(tool, "name", "?"))
+        return ctx
+
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
         """Remove <think>…</think> blocks that some models embed in content."""
@@ -294,7 +307,8 @@ class AgentLoop:
                                 else ("cli", msg.chat_id))
             logger.info("Processing system message from {}", msg.sender_id)
             sid = f"{channel}:{chat_id}"
-            initial = await self.conversation.build_prompt(sid, msg.content, channel=channel, chat_id=chat_id)
+            plugin_ctx = self._collect_plugin_context()
+            initial = await self.conversation.build_prompt(sid, msg.content, channel=channel, chat_id=chat_id, plugin_context=plugin_ctx or None)
             final_content, _, all_msgs = await self._run_agent_loop(initial)
             await self.conversation.record(sid, all_msgs[len(initial) - 1:])
             return OutboundMessage(channel=channel, chat_id=chat_id,
@@ -322,10 +336,12 @@ class AgentLoop:
 
         self._notify_tools_inbound(msg)
 
+        plugin_ctx = self._collect_plugin_context()
         initial = await self.conversation.build_prompt(
             sid, msg.content,
             channel=msg.channel, chat_id=msg.chat_id,
             media=msg.media if msg.media else None,
+            plugin_context=plugin_ctx or None,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:

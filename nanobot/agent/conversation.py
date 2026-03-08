@@ -41,11 +41,14 @@ class Conversation(Protocol):
         channel: str | None = None,
         chat_id: str | None = None,
         media: list[str] | None = None,
+        plugin_context: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Return the full messages list to send to the LLM.
 
         Includes system prompt, windowed history, and the new user message.
         May trigger async background consolidation if the history is long.
+        plugin_context is injected into the system prompt (e.g. from tools/channels
+        that implement the optional system_context() hook).
         """
         ...
 
@@ -116,6 +119,7 @@ class DefaultConversation:
         channel: str | None = None,
         chat_id: str | None = None,
         media: list[str] | None = None,
+        plugin_context: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         session = self._sessions.get_or_create(session_id)
 
@@ -148,6 +152,7 @@ class DefaultConversation:
             media=media,
             channel=channel,
             chat_id=chat_id,
+            plugin_context=plugin_context,
         )
 
     async def record(

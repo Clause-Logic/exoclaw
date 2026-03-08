@@ -29,12 +29,13 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from nanobot.agent.tools.protocol import Tool
 from nanobot.bus.protocol import Bus
 from nanobot.channels.manager import ChannelManager
 from nanobot.channels.protocol import Channel
 
 if TYPE_CHECKING:
-    from nanobot.providers.base import LLMProvider
+    from nanobot.providers.protocol import LLMProvider
 
 
 class Nanobot:
@@ -50,6 +51,7 @@ class Nanobot:
         *,
         provider: LLMProvider,
         channels: list[Channel] | None = None,
+        tools: list[Tool] | None = None,
         bus: Bus | None = None,
         workspace: str | Path = "~/.nanobot/workspace",
         model: str | None = None,
@@ -66,6 +68,7 @@ class Nanobot:
     ):
         self.provider = provider
         self.channels = channels or []
+        self.tools = tools or []
         self.bus = bus  # None = use default MessageBus
         self.workspace = Path(workspace).expanduser()
         self.model = model
@@ -118,6 +121,7 @@ class Nanobot:
             max_iterations=self.max_iterations,
             memory_window=self.memory_window,
             reasoning_effort=self.reasoning_effort,
+            tools=self.tools,
             cron_service=cron,
             session_manager=session_manager,
             channels_config=channels_cfg,

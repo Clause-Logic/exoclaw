@@ -8,14 +8,11 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.protocol import Tool
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.protocol import Bus
-from nanobot.config.schema import ExecToolConfig
-from nanobot.providers.base import LLMProvider
+from nanobot.providers.protocol import LLMProvider
 
 
 class SubagentManager:
@@ -30,12 +27,8 @@ class SubagentManager:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         reasoning_effort: str | None = None,
-        brave_api_key: str | None = None,
-        web_proxy: str | None = None,
-        exec_config: "ExecToolConfig | None" = None,
-        restrict_to_workspace: bool = False,
+        tools: list[Tool] | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
@@ -43,10 +36,7 @@ class SubagentManager:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
-        self.brave_api_key = brave_api_key
-        self.web_proxy = web_proxy
-        self.exec_config = exec_config or ExecToolConfig()
-        self.restrict_to_workspace = restrict_to_workspace
+        self._tools = tools or []
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -93,21 +83,10 @@ class SubagentManager:
         logger.info("Subagent [{}] starting task: {}", task_id, label)
 
         try:
-            # Build subagent tools (no message tool, no spawn tool)
+            # Subagents get user-provided tools only (no message/spawn to avoid recursion)
             tools = ToolRegistry()
-            allowed_dir = self.workspace if self.restrict_to_workspace else None
-            tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(ExecTool(
-                working_dir=str(self.workspace),
-                timeout=self.exec_config.timeout,
-                restrict_to_workspace=self.restrict_to_workspace,
-                path_append=self.exec_config.path_append,
-            ))
-            tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
-            tools.register(WebFetchTool(proxy=self.web_proxy))
+            for tool in self._tools:
+                tools.register(tool)
             
             system_prompt = self._build_subagent_prompt()
             messages: list[dict[str, Any]] = [

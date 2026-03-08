@@ -80,6 +80,9 @@ ignore = ["E501"]
 "nanobot.providers.base" = {msg = "nanobot.providers.base has been removed. Use nanobot.providers.protocol.LLMProvider and nanobot.providers.types for the shared types."}
 "nanobot.providers.litellm_provider" = {msg = "Concrete providers have been removed from core. Use a provider package (e.g. nanobot-provider-litellm) instead."}
 "nanobot.providers.registry" = {msg = "nanobot.providers.registry has been removed. Provider selection is now the responsibility of the provider package."}
+"nanobot.agent.tools.web" = {msg = "Concrete tools have been removed from core. Bring your own tool packages and pass them via Nanobot(tools=[...])."}
+"nanobot.agent.tools.shell" = {msg = "Concrete tools have been removed from core. Bring your own tool packages and pass them via Nanobot(tools=[...])."}
+"nanobot.agent.tools.filesystem" = {msg = "Concrete tools have been removed from core. Bring your own tool packages and pass them via Nanobot(tools=[...].)}"}
 
 [tool.ruff.lint.per-file-ignores]
 # These files legitimately reference the concrete MessageBus

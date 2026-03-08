@@ -1,15 +1,15 @@
-"""Base class for agent tools."""
+"""Optional mixin for agent tools providing cast/validate/schema utilities."""
 
-from abc import ABC, abstractmethod
 from typing import Any
 
 
-class Tool(ABC):
+class ToolBase:
     """
-    Abstract base class for agent tools.
+    Optional mixin for tool authors.
 
-    Tools are capabilities that the agent can use to interact with
-    the environment, such as reading files, executing commands, etc.
+    Provides cast_params, validate_params, and to_schema so you don't have
+    to write them yourself. Inherit from ToolBase to get them for free, or
+    skip it and just satisfy the Tool protocol directly.
     """
 
     _TYPE_MAP = {
@@ -20,37 +20,6 @@ class Tool(ABC):
         "array": list,
         "object": dict,
     }
-
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Tool name used in function calls."""
-        pass
-
-    @property
-    @abstractmethod
-    def description(self) -> str:
-        """Description of what the tool does."""
-        pass
-
-    @property
-    @abstractmethod
-    def parameters(self) -> dict[str, Any]:
-        """JSON Schema for tool parameters."""
-        pass
-
-    @abstractmethod
-    async def execute(self, **kwargs: Any) -> str:
-        """
-        Execute the tool with given parameters.
-
-        Args:
-            **kwargs: Tool-specific parameters.
-
-        Returns:
-            String result of the tool execution.
-        """
-        pass
 
     def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
         """Apply safe schema-driven casts before validation."""
@@ -179,3 +148,8 @@ class Tool(ABC):
                 "parameters": self.parameters,
             },
         }
+
+
+# Backward-compat alias — existing code that does `from nanobot.agent.tools.base import Tool`
+# still works; new code should import Tool from nanobot.agent.tools.protocol.
+Tool = ToolBase

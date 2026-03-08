@@ -45,7 +45,7 @@ class ToolBase:
     skip it and just satisfy the Tool protocol directly.
     """
 
-    _TYPE_MAP = {
+    _TYPE_MAP: dict[str, type | tuple[type, ...]] = {
         "string": str,
         "integer": int,
         "number": (int, float),
@@ -64,7 +64,7 @@ class ToolBase:
     def _cast_object(self, obj: Any, schema: dict[str, Any]) -> dict[str, Any]:
         """Cast an object (dict) according to schema."""
         if not isinstance(obj, dict):
-            return obj
+            return obj  # type: ignore[no-any-return]
         props = schema.get("properties", {})
         result = {}
         for key, value in obj.items():

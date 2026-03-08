@@ -22,7 +22,7 @@ class ChannelManager:
     def __init__(self, channels: list[Channel], bus: Bus):
         self.bus = bus
         self.channels: dict[str, Channel] = {ch.name: ch for ch in channels}
-        self._dispatch_task: asyncio.Task | None = None
+        self._dispatch_task: asyncio.Task[None] | None = None
 
     def register(self, channel: Channel) -> None:
         """Register a channel after construction."""

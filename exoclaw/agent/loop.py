@@ -56,7 +56,7 @@ class AgentLoop:
         for tool in self._extra_tools:
             self.tools.register(tool)
         self._running = False
-        self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._active_tasks: dict[str, list[asyncio.Task[None]]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
 
     def _notify_tools_inbound(self, msg: InboundMessage) -> None:
@@ -86,21 +86,21 @@ class AgentLoop:
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
     @staticmethod
-    def _tool_hint(tool_calls: list) -> str:
+    def _tool_hint(tool_calls: list[Any]) -> str:
         """Format tool calls as concise hint, e.g. 'web_search("query")'."""
-        def _fmt(tc):
+        def _fmt(tc: Any) -> str:
             args = (tc.arguments[0] if isinstance(tc.arguments, list) else tc.arguments) or {}
             val = next(iter(args.values()), None) if isinstance(args, dict) else None
             if not isinstance(val, str):
-                return tc.name
+                return str(tc.name)
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
     async def _run_agent_loop(
         self,
-        initial_messages: list[dict],
+        initial_messages: list[dict[str, Any]],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
+    ) -> tuple[str | None, list[str], list[dict[str, Any]]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         messages = initial_messages
         iteration = 0
@@ -196,7 +196,13 @@ class AgentLoop:
             else:
                 task = asyncio.create_task(self._dispatch(msg))
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
-                task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
+
+                def _remove_task(t: asyncio.Task[None], k: str = msg.session_key) -> None:
+                    tasks = self._active_tasks.get(k, [])
+                    if t in tasks:
+                        tasks.remove(t)
+
+                task.add_done_callback(_remove_task)
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""

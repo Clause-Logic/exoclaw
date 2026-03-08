@@ -17,7 +17,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -61,7 +61,7 @@ class Nanobot:
         self.max_iterations = max_iterations
         self.reasoning_effort = reasoning_effort
 
-    def _build(self):
+    def _build(self) -> tuple[Any, Any, Any]:
         """Instantiate all internal components. Called once at run time."""
         from exoclaw.agent.loop import AgentLoop
 

@@ -1,6 +1,6 @@
 [project]
 name = "exoclaw"
-version = "0.2.0"
+version = "0.2.1"
 description = "Protocol-only AI agent framework — bring your own everything"
 requires-python = ">=3.11"
 license = {text = "MIT"}
@@ -38,6 +38,7 @@ packages = ["exoclaw"]
 [tool.hatch.build]
 include = [
     "exoclaw/**/*.py",
+    "exoclaw/py.typed",
 ]
 
 [tool.hatch.build.targets.sdist]

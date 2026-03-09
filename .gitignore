@@ -18,6 +18,8 @@ venv/
 __pycache__/
 poetry.lock
 .pytest_cache/
+.coverage
+htmlcov/
 botpy.log
 scripts/upstream_data.json
 scripts/upstream_prs_cache.json

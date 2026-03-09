@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable
 from loguru import logger
 
 from exoclaw.agent.conversation import Conversation
-from exoclaw.agent.tools.protocol import Tool
+from exoclaw.agent.tools.protocol import Tool, ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.bus.events import InboundMessage, OutboundMessage
 from exoclaw.bus.protocol import Bus
@@ -40,6 +40,13 @@ class AgentLoop:
         max_tokens: int = 4096,
         reasoning_effort: str | None = None,
         tools: list[Tool] | None = None,
+        registry: ToolRegistry | None = None,
+        # Optional lifecycle callbacks — all default to None (backwards compatible).
+        # Plugins pass these in; the loop calls them at the appropriate point.
+        on_pre_context: Callable[[str, str, str, str], Awaitable[str]] | None = None,
+        on_pre_tool: Callable[[str, dict[str, Any], str], Awaitable[str | None]] | None = None,
+        on_post_turn: Callable[[list[dict[str, Any]], str, str, str], Awaitable[None]] | None = None,
+        on_max_iterations: Callable[[str, str, str], Awaitable[None]] | None = None,
     ):
         self.bus = bus
         self.provider = provider
@@ -49,15 +56,22 @@ class AgentLoop:
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
         self._extra_tools = tools or []
+        self._on_pre_context = on_pre_context
+        self._on_pre_tool = on_pre_tool
+        self._on_post_turn = on_post_turn
+        self._on_max_iterations = on_max_iterations
 
         self.conversation = conversation
 
-        self.tools = ToolRegistry()
+        self.tools = registry or ToolRegistry()
         for tool in self._extra_tools:
             self.tools.register(tool)
+            if hasattr(tool, "set_bus"):
+                tool.set_bus(self.bus)
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task[None]]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
+        self._current_ctx: ToolContext | None = None  # set before each _run_agent_loop call
 
     def _notify_tools_inbound(self, msg: InboundMessage) -> None:
         """Let tools that care about inbound messages update their state."""
@@ -150,7 +164,16 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    if self._on_pre_tool:
+                        sk = self._current_ctx.session_key if self._current_ctx else ""
+                        rejection = await self._on_pre_tool(tool_call.name, tool_call.arguments, sk)
+                        if rejection:
+                            logger.info("on_pre_tool rejected {}: {}", tool_call.name, rejection[:100])
+                            result = rejection
+                        else:
+                            result = await self.tools.execute(tool_call.name, tool_call.arguments, self._current_ctx)
+                    else:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments, self._current_ctx)
                     messages = [
                         *messages,
                         {"role": "tool", "tool_call_id": tool_call.id,
@@ -177,6 +200,9 @@ class AgentLoop:
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
                 "without completing the task. You can try breaking the task into smaller steps."
             )
+            if self._on_max_iterations and self._current_ctx:
+                ctx = self._current_ctx
+                asyncio.ensure_future(self._on_max_iterations(ctx.session_key, ctx.channel, ctx.chat_id))
 
         return final_content, tools_used, messages
 
@@ -299,8 +325,14 @@ class AgentLoop:
             )
 
         self._notify_tools_inbound(msg)
+        self._current_ctx = ToolContext(session_key=sid, channel=msg.channel, chat_id=msg.chat_id)
 
         plugin_ctx = self._collect_plugin_context()
+        if self._on_pre_context:
+            extra = await self._on_pre_context(msg.content, sid, msg.channel, msg.chat_id)
+            if extra:
+                plugin_ctx.append(extra)
+
         initial = await self.conversation.build_prompt(
             sid, msg.content,
             channel=msg.channel, chat_id=msg.chat_id,
@@ -324,7 +356,10 @@ class AgentLoop:
             final_content = "I've completed processing but have no response to give."
 
         # new_msgs = user message + everything the loop added
-        await self.conversation.record(sid, all_msgs[len(initial) - 1:])
+        new_msgs = all_msgs[len(initial) - 1:]
+        await self.conversation.record(sid, new_msgs)
+        if self._on_post_turn and new_msgs:
+            asyncio.ensure_future(self._on_post_turn(new_msgs, sid, msg.channel, msg.chat_id))
 
         if any(getattr(t, "sent_in_turn", False) for t in self.tools._tools.values()):
             return None

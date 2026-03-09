@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from exoclaw.agent.tools.protocol import Tool
+from exoclaw.agent.tools.protocol import Tool, ToolContext
 
 
 class ToolRegistry:
@@ -45,8 +45,15 @@ class ToolRegistry:
             for tool in self._tools.values()
         ]
 
-    async def execute(self, name: str, params: dict[str, Any]) -> str:
-        """Execute a tool by name with given parameters."""
+    async def execute(
+        self, name: str, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> str:
+        """Execute a tool by name with given parameters.
+
+        If the tool implements execute_with_context(ctx, **kwargs), that is called
+        instead of execute(**kwargs). Falls back to execute() if not implemented or
+        ctx is None.
+        """
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
 
         tool = self._tools.get(name)
@@ -60,7 +67,10 @@ class ToolRegistry:
                 errors: list[str] = getattr(tool, "validate_params")(params)
                 if errors:
                     return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _HINT
-            result = await tool.execute(**params)
+            if ctx is not None and hasattr(tool, "execute_with_context"):
+                result: str = await getattr(tool, "execute_with_context")(ctx, **params)
+            else:
+                result = await tool.execute(**params)
             if isinstance(result, str) and result.startswith("Error"):
                 return result + _HINT
             return result

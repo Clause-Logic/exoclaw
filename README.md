@@ -132,10 +132,38 @@ def on_inbound(self, msg: InboundMessage) -> None:
 def system_context(self) -> str:
     """Return a string injected into the system prompt every turn."""
 
+async def execute_with_context(self, ctx: ToolContext, **kwargs: Any) -> str:
+    """Like execute(), but receives ToolContext(session_key, channel, chat_id).
+    The registry calls this instead of execute() when context is available."""
+
+def set_bus(self, bus: Bus) -> None:
+    """Called at registration time. Lets tools publish back to the bus
+    for async/background work that re-enters the loop later."""
+
 async def cancel_by_session(self, session_key: str) -> int:
     """Cancel running work for a session. Return count cancelled. Called on /stop."""
 
 sent_in_turn: bool  # If True after execute(), loop suppresses the normal reply
+```
+
+**Loop lifecycle callbacks** (pass to `AgentLoop.__init__` — all optional):
+
+```python
+AgentLoop(
+    ...,
+    # Called before build_prompt. Return value is appended to the system prompt.
+    on_pre_context=async def(message, session_key, channel, chat_id) -> str,
+
+    # Called before each tool execution. Return a non-empty string to reject
+    # the call — the string is fed back to the LLM as the tool result.
+    on_pre_tool=async def(tool_name, tool_args, session_key) -> str | None,
+
+    # Called after each turn is recorded. Fire-and-forget.
+    on_post_turn=async def(messages, session_key, channel, chat_id) -> None,
+
+    # Called when the tool call iteration limit is reached. Fire-and-forget.
+    on_max_iterations=async def(session_key, channel, chat_id) -> None,
+)
 ```
 
 **Plugin ideas:**

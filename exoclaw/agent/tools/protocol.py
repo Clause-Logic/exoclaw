@@ -2,7 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+
+
+@dataclass
+class ToolContext:
+    """
+    Session context passed to tools that implement execute_with_context().
+
+    Duck-typed — tools that need session routing implement:
+
+        async def execute_with_context(self, ctx: ToolContext, **kwargs: Any) -> str:
+            ...
+
+    Tools that don't need it keep execute(**kwargs) and the registry handles both.
+    """
+    session_key: str
+    channel: str
+    chat_id: str
 
 
 @runtime_checkable

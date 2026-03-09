@@ -199,37 +199,109 @@ The default `MessageBus` is a pair of asyncio queues — sufficient for single-p
 
 ## Usage
 
+### GitHub Actions bot
+
+The quickest way to run exoclaw in production — zero infrastructure, no servers. See [exoclaw-github](https://github.com/Clause-Logic/exoclaw-github) for the full plugin and a [live demo](https://github.com/Clause-Logic/exoclaw-github-demo).
+
+Drop a workflow file in your repo and the bot responds to issues and PR comments using your `GITHUB_TOKEN` — no extra secrets needed:
+
+```yaml
+# .github/workflows/bot.yml
+- uses: Clause-Logic/exoclaw-github@main
+  with:
+    trigger: "@exoclawbot"
+    tools: github_pr_diff, github_file, github_checks, github_review, github_label
+```
+
+---
+
+### Minimal agent in Python
+
 ```python
 import asyncio
-from exoclaw import Nanobot
+from exoclaw.agent.loop import AgentLoop
+from exoclaw.bus.queue import MessageBus
+from exoclaw.bus.events import InboundMessage
 
-# All of these come from plugin packages — not from exoclaw itself
-from exoclaw_provider_litellm import LiteLLMProvider
-from exoclaw_conversation import DefaultConversation
-from exoclaw_channel_telegram import TelegramChannel
-from exoclaw_tools_web import WebSearchTool
-from exoclaw_tools_mcp import connect_mcp
+# Plugin packages — not part of exoclaw core
+from exoclaw_provider_litellm.provider import LiteLLMProvider
+from exoclaw_conversation.conversation import DefaultConversation
 
 async def main():
-    # MCP tools require async setup — connect before constructing the app
-    mcp_tools = await connect_mcp({
-        "filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]},
-    })
-
-    app = Nanobot(
-        provider=LiteLLMProvider(model="anthropic/claude-opus-4-5"),
-        conversation=DefaultConversation(workspace="~/.mybot/workspace"),
-        channels=[
-            TelegramChannel(token="..."),
-        ],
-        tools=[
-            WebSearchTool(),
-            *mcp_tools,
-        ],
+    bus = MessageBus()
+    provider = LiteLLMProvider(default_model="claude-sonnet-4-6")
+    conversation = DefaultConversation.create(
+        workspace="~/.mybot",
+        provider=provider,
+        model="claude-sonnet-4-6",
     )
-    await app.run()
+
+    loop = AgentLoop(bus=bus, provider=provider, conversation=conversation)
+    asyncio.create_task(loop.run())
+
+    # Publish a message and consume the response
+    await bus.publish_inbound(InboundMessage(
+        channel="cli", sender_id="user", chat_id="main", content="Hello!"
+    ))
+    response = await bus.consume_outbound()
+    print(response.content)
 
 asyncio.run(main())
+```
+
+---
+
+### Drop into an existing web app
+
+exoclaw doesn't own your event loop — wire the bus into whatever you already have. Here's FastAPI:
+
+```python
+from fastapi import FastAPI
+from exoclaw.agent.loop import AgentLoop
+from exoclaw.bus.queue import MessageBus
+from exoclaw.bus.events import InboundMessage, OutboundMessage
+
+app = FastAPI()
+bus = MessageBus()
+agent = AgentLoop(bus=bus, provider=..., conversation=...)
+
+@app.on_event("startup")
+async def start_agent():
+    import asyncio
+    asyncio.create_task(agent.run())
+
+@app.post("/chat")
+async def chat(user_id: str, message: str):
+    await bus.publish_inbound(InboundMessage(
+        channel="api", sender_id=user_id, chat_id=user_id, content=message,
+    ))
+    response: OutboundMessage = await bus.consume_outbound()
+    return {"reply": response.content}
+```
+
+The agent loop runs as a background task. Your API routes are just producers and consumers on the bus.
+
+---
+
+### Swap components without touching the loop
+
+```python
+# File-backed sessions (default)
+from exoclaw_conversation.conversation import DefaultConversation
+conversation = DefaultConversation.create(workspace="~/.mybot", ...)
+
+# → swap for Redis without changing anything else
+from exoclaw_conversation_redis import RedisConversation
+conversation = RedisConversation(url="redis://localhost", ...)
+
+# Local model
+provider = LiteLLMProvider(default_model="ollama/llama3")
+
+# → swap for Anthropic without changing anything else
+provider = LiteLLMProvider(default_model="claude-sonnet-4-6")
+
+# Same AgentLoop, same Bus, same tools — only the component changed
+loop = AgentLoop(bus=bus, provider=provider, conversation=conversation, tools=[...])
 ```
 
 ---

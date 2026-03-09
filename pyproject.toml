@@ -1,13 +1,13 @@
 [project]
 name = "exoclaw"
-version = "0.1.1"
+version = "0.1.2"
 description = "Protocol-only AI agent framework — bring your own everything"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "exoclaw contributors"}
 ]
-keywords = ["ai", "agent", "chatbot", "framework"]
+keywords = ["agent", "ai", "framework", "protocol", "pluggable", "llm", "exoclaw", "cmdop"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

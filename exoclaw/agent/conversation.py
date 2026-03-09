@@ -10,7 +10,7 @@ class Conversation(Protocol):
     """
     Structural protocol for conversation state management.
 
-    External packages implement this without inheriting from any nanobot class:
+    External packages implement this without inheriting from any exoclaw class:
 
         class MyConversation:
             async def build_prompt(self, session_id, message, **kw) -> list[dict]: ...

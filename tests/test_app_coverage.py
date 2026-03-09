@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from exoclaw.app import Nanobot
+from exoclaw.app import Exoclaw as Nanobot
 from exoclaw.bus.queue import MessageBus
 
 

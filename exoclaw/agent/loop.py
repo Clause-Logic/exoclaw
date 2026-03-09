@@ -295,7 +295,7 @@ class AgentLoop:
         if cmd == "/help":
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id,
-                content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands",
+                content="🦀 exoclaw commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands",
             )
 
         self._notify_tools_inbound(msg)

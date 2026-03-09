@@ -10,7 +10,7 @@ class Tool(Protocol):
     """
     Structural protocol for agent tools.
 
-    External packages implement this without inheriting from any nanobot class:
+    External packages implement this without inheriting from any exoclaw class:
 
         class MyTool:
             name = "my_tool"

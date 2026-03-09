@@ -1,10 +1,10 @@
 """
-nanobot - A lightweight AI agent framework
+exoclaw - Protocol-only AI agent framework
 """
 
 __version__ = "0.1.4.post3"
 __logo__ = "🐈"
 
-from exoclaw.app import Nanobot
+from exoclaw.app import Exoclaw
 
-__all__ = ["Nanobot"]
+__all__ = ["Exoclaw"]

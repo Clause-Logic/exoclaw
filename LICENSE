@@ -1,6 +1,10 @@
 MIT License
 
-Copyright (c) 2025 nanobot contributors
+Copyright (c) 2026 Clause Logic and contributors
+Copyright (c) 2025 nanobot contributors (original work, https://github.com/NanobotAI/nanobot)
+
+exoclaw began as a fork of nanobot and has since been substantially rewritten.
+The original nanobot license and copyright are retained per the terms of the MIT License.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

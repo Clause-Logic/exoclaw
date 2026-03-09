@@ -4,7 +4,6 @@
 *.pyc
 dist/
 build/
-docs/
 *.egg-info/
 *.egg
 *.pyc
@@ -20,4 +19,6 @@ __pycache__/
 poetry.lock
 .pytest_cache/
 botpy.log
+scripts/upstream_data.json
+scripts/upstream_prs_cache.json
 

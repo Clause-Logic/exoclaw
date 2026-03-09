@@ -121,7 +121,7 @@ class Tool(Protocol):
     async def execute(self, **kwargs: Any) -> str: ...
 ```
 
-Tools are registered at construction time via `Nanobot(tools=[...])`. The loop calls `tool.execute(**args)` and feeds results back into the LLM context.
+Tools are registered at construction time via `Exoclaw(tools=[...])`. The loop calls `tool.execute(**args)` and feeds results back into the LLM context.
 
 **Optional hooks** (duck-typed — implement if you need them):
 
@@ -387,7 +387,7 @@ The loop collects `system_context()` from all registered tools before each `buil
 
 ```
 exoclaw/
-  app.py                   # Nanobot — the composition root
+  app.py                   # Exoclaw — the composition root
   agent/
     loop.py                # AgentLoop — the core processing engine
     conversation.py        # Conversation protocol

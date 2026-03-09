@@ -1,12 +1,12 @@
 """
-Nanobot — the composition root.
+Exoclaw — the composition root.
 
 Usage:
 
     import asyncio
-    from nanobot import Nanobot
+    from exoclaw import Exoclaw
 
-    app = Nanobot(
+    app = Exoclaw(
         provider=MyProvider(),
         conversation=MyConversation(),
         channels=[MyChannel(...)],
@@ -31,9 +31,9 @@ if TYPE_CHECKING:
     from exoclaw.providers.protocol import LLMProvider
 
 
-class Nanobot:
+class Exoclaw:
     """
-    Wires together all nanobot components and runs the event loop.
+    Wires together all exoclaw components and runs the event loop.
     """
 
     def __init__(
@@ -93,7 +93,7 @@ class Nanobot:
         """Start all components and run until interrupted."""
         bus, agent, channel_manager = self._build()
 
-        logger.info("Nanobot starting")
+        logger.info("Exoclaw starting")
 
         try:
             await asyncio.gather(

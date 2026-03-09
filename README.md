@@ -1,8 +1,8 @@
 # exoclaw 🦀
 
-**Protocol-only AI agent framework. Bring your own everything.**
+**AI agent infrastructure that fits in your stack, not the other way around.**
 
-exoclaw is the skeleton. You provide the flesh — your LLM provider, your conversation storage, your channels, your tools. Nothing is baked in.
+You have an app. Wire in exoclaw and it becomes intelligent — tool use, session memory, multi-turn conversations, any LLM. You own every piece. Nothing is baked in.
 
 ```
 pip install exoclaw
@@ -14,19 +14,18 @@ One runtime dependency: `loguru`.
 
 ## Origin
 
-exoclaw is a fork of [nanobot](https://github.com/NanobotAI/nanobot) with one goal: reduce the maintenance surface area by aligning on a defined set of extension points.
+exoclaw is a fork of [nanobot](https://github.com/NanobotAI/nanobot), stripped down to ~2,000 lines of auditable Python.
 
-The original nanobot ships with batteries — a built-in LLM provider, memory system, cron scheduler, heartbeat service, MCP integration, Telegram/Discord channels, and more. That's convenient to start, but every baked-in feature is a PR waiting to happen. A Telegram API change breaks a cron bug fix release. An MCP SDK upgrade pulls in dependency conflicts for users who don't use MCP. The framework and its features are entangled.
+That's it. Read it in an afternoon. Understand exactly what you're shipping. Then wire it into your FastAPI app, your GitHub Actions workflow, your Slack bot, your CLI — whatever you're building. Your stack gains OpenClaw-grade agentic capabilities without taking on a framework as a dependency.
 
-exoclaw cuts the knot. The core defines five protocols and runs a loop. That's it. Everything else — conversation storage, channel integrations, tools, providers — lives in separate packages that you opt into. The core never changes because it has nothing to change.
+The original nanobot ships with batteries — LLM provider, memory system, cron, MCP, Telegram, Discord. Convenient to start. But every baked-in feature is a PR waiting to happen. A Telegram API change breaks a cron bug fix release. An MCP upgrade pulls in conflicts for users who don't use MCP. The framework and its features are entangled.
 
-**Why this benefits you, not just the maintainer:**
+exoclaw cuts the knot. Five protocols, one loop, ~2,000 lines. Everything else — storage, channels, tools, providers — lives in separate packages you opt into. The core never changes because it has nothing to change.
 
-- **No surprise breakage.** A bug in someone else's Telegram integration can't break your log monitor. Each plugin fails independently.
-- **No dependency drag.** You don't pull in MCP, croniter, and readability-lxml if you don't use them. Your dependency tree contains exactly what you chose.
-- **Auditable trust.** The core is ~1,200 lines, mypy strict, 95% test coverage. You can read and understand it in an afternoon. When you trust exoclaw, you know exactly what you're trusting.
-- **Composable upgrades.** Swap your conversation backend from files to Redis without touching the loop. Update your provider package when a new model ships without risking anything else.
-- **Scoped blast radius.** When something breaks, it breaks in the package that owns it — not in the framework everyone shares.
+- **Auditable.** ~2,000 lines, mypy strict, 95% test coverage. You can read and understand it in an afternoon.
+- **No dependency drag.** Your tree contains exactly what you chose.
+- **No surprise breakage.** A bug in someone else's Telegram plugin can't break your app.
+- **Composable.** Swap providers, storage, or channels without touching the loop.
 
 ---
 

@@ -16,7 +16,7 @@ One runtime dependency: `loguru`.
 
 exoclaw is a fork of [nanobot](https://github.com/NanobotAI/nanobot), stripped down to ~2,000 lines of auditable Python.
 
-That's it. Read it in an afternoon. Understand exactly what you're shipping. Then wire it into your FastAPI app, your GitHub Actions workflow, your Slack bot, your CLI — whatever you're building. Your stack gains OpenClaw-grade agentic capabilities without taking on a framework as a dependency.
+That's it. Read it in an afternoon. Understand exactly what you're shipping. Then wire it into your FastAPI app, your [GitHub Actions workflow](https://github.com/Clause-Logic/exoclaw-github), your Slack bot, your CLI — whatever you're building. Your stack gains OpenClaw-grade agentic capabilities without taking on a framework as a dependency.
 
 The original nanobot ships with batteries — LLM provider, memory system, cron, MCP, Telegram, Discord. Convenient to start. But every baked-in feature is a PR waiting to happen. A Telegram API change breaks a cron bug fix release. An MCP upgrade pulls in conflicts for users who don't use MCP. The framework and its features are entangled.
 

@@ -185,24 +185,32 @@ class AgentLoop:
         self._running = True
         logger.info("Agent loop started")
 
-        while self._running:
-            try:
-                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
+        try:
+            while self._running:
+                try:
+                    msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
 
-            if msg.content.strip().lower() == "/stop":
-                await self._handle_stop(msg)
-            else:
-                task = asyncio.create_task(self._dispatch(msg))
-                self._active_tasks.setdefault(msg.session_key, []).append(task)
+                if msg.content.strip().lower() == "/stop":
+                    await self._handle_stop(msg)
+                else:
+                    task = asyncio.create_task(self._dispatch(msg))
+                    self._active_tasks.setdefault(msg.session_key, []).append(task)
 
-                def _remove_task(t: asyncio.Task[None], k: str = msg.session_key) -> None:
-                    tasks = self._active_tasks.get(k, [])
-                    if t in tasks:
-                        tasks.remove(t)
+                    def _remove_task(t: asyncio.Task[None], k: str = msg.session_key) -> None:
+                        tasks = self._active_tasks.get(k, [])
+                        if t in tasks:
+                            tasks.remove(t)
 
-                task.add_done_callback(_remove_task)
+                    task.add_done_callback(_remove_task)
+        finally:
+            all_tasks = [t for ts in self._active_tasks.values() for t in ts if not t.done()]
+            for t in all_tasks:
+                t.cancel()
+            if all_tasks:
+                await asyncio.gather(*all_tasks, return_exceptions=True)
+            logger.info("Agent loop stopped")
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""

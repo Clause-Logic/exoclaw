@@ -120,3 +120,48 @@ class TestDispatch:
         assert order == ["start-a", "end-a", "start-b", "end-b"]
 
 
+class TestRunCancellation:
+    @pytest.mark.asyncio
+    async def test_run_cancels_cleanly_with_active_dispatch(self):
+        """When run() is cancelled, it must also cancel any in-flight _dispatch() child tasks."""
+        from exoclaw.agent.loop import AgentLoop
+        from exoclaw.bus.events import InboundMessage
+        from exoclaw.bus.queue import MessageBus
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(bus=bus, provider=provider, conversation=MagicMock())
+
+        dispatch_started = asyncio.Event()
+        dispatch_cancelled = asyncio.Event()
+
+        async def slow_dispatch(msg):
+            dispatch_started.set()
+            try:
+                await asyncio.sleep(60)  # simulates a hung LLM call
+            except asyncio.CancelledError:
+                dispatch_cancelled.set()
+                raise
+
+        loop._dispatch = slow_dispatch  # type: ignore[method-assign]
+
+        run_task = asyncio.create_task(loop.run())
+
+        # Publish a message so _dispatch starts
+        await bus.publish_inbound(InboundMessage(
+            channel="test", sender_id="u1", chat_id="c1", content="hello"
+        ))
+        await asyncio.wait_for(dispatch_started.wait(), timeout=2.0)
+
+        # Cancel run() — the child dispatch task must also be cancelled
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+        # Give the event loop one tick to propagate cancellation to child tasks
+        await asyncio.sleep(0)
+
+        assert dispatch_cancelled.is_set(), (
+            "run() was cancelled but the in-flight _dispatch() task was not cancelled — "
+            "child tasks are leaked and will hang the process"
+        )

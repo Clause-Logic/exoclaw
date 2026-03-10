@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from exoclaw.agent.loop import AgentLoop
 from exoclaw.agent.tools.protocol import ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
@@ -14,7 +12,11 @@ from exoclaw.bus.events import InboundMessage
 from exoclaw.bus.queue import MessageBus
 
 
-def _make_response(content="hello", has_tool_calls=False, finish_reason="stop"):
+def _make_response(
+    content: str | None = "hello",
+    has_tool_calls: bool = False,
+    finish_reason: str = "stop",
+) -> MagicMock:
     r = MagicMock()
     r.has_tool_calls = has_tool_calls
     r.content = content
@@ -25,7 +27,11 @@ def _make_response(content="hello", has_tool_calls=False, finish_reason="stop"):
     return r
 
 
-def _make_tool_call(name="my_tool", args=None, call_id="tc1"):
+def _make_tool_call(
+    name: str = "my_tool",
+    args: dict[str, object] | None = None,
+    call_id: str = "tc1",
+) -> MagicMock:
     tc = MagicMock()
     tc.name = name
     tc.arguments = args or {}
@@ -33,7 +39,7 @@ def _make_tool_call(name="my_tool", args=None, call_id="tc1"):
     return tc
 
 
-def _make_loop(**kwargs):
+def _make_loop(**kwargs: object) -> tuple[AgentLoop, MessageBus]:
     bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
@@ -50,8 +56,9 @@ def _make_loop(**kwargs):
 # ToolContext
 # ---------------------------------------------------------------------------
 
+
 class TestToolContext:
-    def test_fields(self):
+    def test_fields(self) -> None:
         ctx = ToolContext(session_key="cli:main", channel="cli", chat_id="main")
         assert ctx.session_key == "cli:main"
         assert ctx.channel == "cli"
@@ -62,8 +69,9 @@ class TestToolContext:
 # execute_with_context in ToolRegistry
 # ---------------------------------------------------------------------------
 
+
 class TestExecuteWithContext:
-    async def test_calls_execute_with_context_when_present(self):
+    async def test_calls_execute_with_context_when_present(self) -> None:
         reg = ToolRegistry()
         tool = MagicMock()
         tool.name = "ctx_tool"
@@ -79,7 +87,7 @@ class TestExecuteWithContext:
         tool.execute_with_context.assert_called_once_with(ctx)
         tool.execute.assert_not_called()
 
-    async def test_falls_back_to_execute_when_no_ctx(self):
+    async def test_falls_back_to_execute_when_no_ctx(self) -> None:
         reg = ToolRegistry()
         tool = MagicMock()
         tool.name = "ctx_tool"
@@ -93,10 +101,11 @@ class TestExecuteWithContext:
         assert result == "plain"
         tool.execute_with_context.assert_not_called()
 
-    async def test_falls_back_when_tool_has_no_execute_with_context(self):
+    async def test_falls_back_when_tool_has_no_execute_with_context(self) -> None:
         reg = ToolRegistry()
-        tool = MagicMock(spec=["name", "description", "parameters", "execute",
-                                "cast_params", "validate_params"])
+        tool = MagicMock(
+            spec=["name", "description", "parameters", "execute", "cast_params", "validate_params"]
+        )
         tool.name = "simple_tool"
         tool.cast_params = MagicMock(side_effect=lambda p: p)
         tool.validate_params = MagicMock(return_value=[])
@@ -112,8 +121,9 @@ class TestExecuteWithContext:
 # set_bus — duck-typed hook called at registration
 # ---------------------------------------------------------------------------
 
+
 class TestSetBus:
-    def test_set_bus_called_on_tool_registration(self):
+    def test_set_bus_called_on_tool_registration(self) -> None:
         tool = MagicMock()
         tool.name = "bus_tool"
         tool.set_bus = MagicMock()
@@ -121,7 +131,7 @@ class TestSetBus:
         loop, bus = _make_loop(tools=[tool])
         tool.set_bus.assert_called_once_with(bus)
 
-    def test_tools_without_set_bus_are_unaffected(self):
+    def test_tools_without_set_bus_are_unaffected(self) -> None:
         tool = MagicMock(spec=["name", "description", "parameters", "execute"])
         tool.name = "plain_tool"
         # Should not raise even though set_bus is not implemented
@@ -132,13 +142,14 @@ class TestSetBus:
 # Injectable registry
 # ---------------------------------------------------------------------------
 
+
 class TestInjectableRegistry:
-    def test_injected_registry_is_used(self):
+    def test_injected_registry_is_used(self) -> None:
         reg = ToolRegistry()
         loop, _ = _make_loop(registry=reg)
         assert loop.tools is reg
 
-    def test_default_registry_created_when_not_injected(self):
+    def test_default_registry_created_when_not_injected(self) -> None:
         loop, _ = _make_loop()
         assert isinstance(loop.tools, ToolRegistry)
 
@@ -147,8 +158,9 @@ class TestInjectableRegistry:
 # on_pre_context callback
 # ---------------------------------------------------------------------------
 
+
 class TestOnPreContext:
-    async def test_on_pre_context_result_appended_to_plugin_context(self):
+    async def test_on_pre_context_result_appended_to_plugin_context(self) -> None:
         extra_ctx = "## Extra\nsome injected context"
         on_pre_context = AsyncMock(return_value=extra_ctx)
 
@@ -160,9 +172,9 @@ class TestOnPreContext:
         on_pre_context.assert_called_once()
         args = on_pre_context.call_args[0]
         assert args[0] == "hello"  # message
-        assert args[2] == "cli"    # channel
+        assert args[2] == "cli"  # channel
 
-    async def test_empty_pre_context_not_appended(self):
+    async def test_empty_pre_context_not_appended(self) -> None:
         on_pre_context = AsyncMock(return_value="")
         loop, bus = _make_loop(on_pre_context=on_pre_context)
 
@@ -177,8 +189,9 @@ class TestOnPreContext:
 # on_pre_tool callback
 # ---------------------------------------------------------------------------
 
+
 class TestOnPreTool:
-    async def test_on_pre_tool_rejection_used_as_result(self):
+    async def test_on_pre_tool_rejection_used_as_result(self) -> None:
         tool_response = _make_response(has_tool_calls=True)
         tool_response.tool_calls = [_make_tool_call("my_tool")]
         final_response = _make_response(content="done")
@@ -202,8 +215,11 @@ class TestOnPreTool:
 
         bus = MessageBus()
         loop = AgentLoop(
-            bus=bus, provider=provider, conversation=conversation,
-            tools=[tool], on_pre_tool=on_pre_tool,
+            bus=bus,
+            provider=provider,
+            conversation=conversation,
+            tools=[tool],
+            on_pre_tool=on_pre_tool,
         )
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="main", content="go")
@@ -212,7 +228,7 @@ class TestOnPreTool:
         on_pre_tool.assert_called_once_with("my_tool", {}, "cli:main")
         tool.execute.assert_not_called()
 
-    async def test_on_pre_tool_pass_through_when_no_rejection(self):
+    async def test_on_pre_tool_pass_through_when_no_rejection(self) -> None:
         tool_response = _make_response(has_tool_calls=True)
         tool_response.tool_calls = [_make_tool_call("my_tool")]
         final_response = _make_response(content="done")
@@ -226,8 +242,9 @@ class TestOnPreTool:
         conversation.record = AsyncMock()
 
         # spec excludes execute_with_context so registry falls back to execute()
-        tool = MagicMock(spec=["name", "description", "parameters", "execute",
-                                "cast_params", "validate_params"])
+        tool = MagicMock(
+            spec=["name", "description", "parameters", "execute", "cast_params", "validate_params"]
+        )
         tool.name = "my_tool"
         tool.description = "A tool"
         tool.parameters = {"type": "object", "properties": {}}
@@ -239,8 +256,11 @@ class TestOnPreTool:
 
         bus = MessageBus()
         loop = AgentLoop(
-            bus=bus, provider=provider, conversation=conversation,
-            tools=[tool], on_pre_tool=on_pre_tool,
+            bus=bus,
+            provider=provider,
+            conversation=conversation,
+            tools=[tool],
+            on_pre_tool=on_pre_tool,
         )
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="main", content="go")
@@ -253,8 +273,9 @@ class TestOnPreTool:
 # on_post_turn callback
 # ---------------------------------------------------------------------------
 
+
 class TestOnPostTurn:
-    async def test_on_post_turn_fired_after_turn(self):
+    async def test_on_post_turn_fired_after_turn(self) -> None:
         on_post_turn = AsyncMock()
         loop, bus = _make_loop(on_post_turn=on_post_turn)
 
@@ -265,17 +286,18 @@ class TestOnPostTurn:
         await asyncio.sleep(0)
         on_post_turn.assert_called_once()
         args = on_post_turn.call_args[0]
-        assert args[1] == "cli:main"   # session_key
-        assert args[2] == "cli"        # channel
-        assert args[3] == "main"       # chat_id
+        assert args[1] == "cli:main"  # session_key
+        assert args[2] == "cli"  # channel
+        assert args[3] == "main"  # chat_id
 
 
 # ---------------------------------------------------------------------------
 # on_max_iterations callback
 # ---------------------------------------------------------------------------
 
+
 class TestOnMaxIterations:
-    async def test_on_max_iterations_fired_when_limit_reached(self):
+    async def test_on_max_iterations_fired_when_limit_reached(self) -> None:
         # Always return tool calls so the loop hits max_iterations
         tool_response = _make_response(has_tool_calls=True)
         tc = _make_tool_call("looping_tool")
@@ -302,8 +324,12 @@ class TestOnMaxIterations:
 
         bus = MessageBus()
         loop = AgentLoop(
-            bus=bus, provider=provider, conversation=conversation,
-            tools=[tool], max_iterations=2, on_max_iterations=_on_max,
+            bus=bus,
+            provider=provider,
+            conversation=conversation,
+            tools=[tool],
+            max_iterations=2,
+            on_max_iterations=_on_max,
         )
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="main", content="go")

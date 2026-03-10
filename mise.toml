@@ -1,0 +1,23 @@
+[tasks.lint]
+description = "Type check with ty and lint with ruff"
+sources = ["exoclaw/**/*.py", "tests/**/*.py", "pyproject.toml"]
+run = [
+    "uv run ty check exoclaw",
+    "uv run ruff check exoclaw tests",
+]
+
+[tasks.format]
+description = "Format code with ruff"
+sources = ["exoclaw/**/*.py", "tests/**/*.py"]
+run = "uv run ruff format exoclaw tests"
+
+[tasks.check-format]
+description = "Check formatting without writing changes"
+sources = ["exoclaw/**/*.py", "tests/**/*.py"]
+run = "uv run ruff format --check exoclaw tests"
+
+[tasks.test]
+description = "Run tests with coverage"
+sources = ["exoclaw/**/*.py", "tests/**/*.py", "pyproject.toml"]
+outputs = [".coverage"]
+run = "uv run pytest --cov=exoclaw --cov-fail-under=95 tests/"

@@ -7,7 +7,8 @@ retry strategies, or execution environments).
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Awaitable, Callable
+from typing import Protocol, runtime_checkable
 
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import ToolContext
@@ -24,8 +25,8 @@ class Executor(Protocol):
         self,
         provider: LLMProvider,
         *,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
@@ -36,7 +37,7 @@ class Executor(Protocol):
         self,
         registry: ToolRegistry,
         name: str,
-        params: dict[str, Any],
+        params: dict[str, object],
         ctx: ToolContext | None = None,
     ) -> str: ...
 
@@ -45,14 +46,14 @@ class Executor(Protocol):
         conversation: Conversation,
         session_id: str,
         message: str,
-        **kwargs: Any,
-    ) -> list[dict[str, Any]]: ...
+        **kwargs: object,
+    ) -> list[dict[str, object]]: ...
 
     async def record(
         self,
         conversation: Conversation,
         session_id: str,
-        new_messages: list[dict[str, Any]],
+        new_messages: list[dict[str, object]],
     ) -> None: ...
 
     async def clear(
@@ -63,11 +64,11 @@ class Executor(Protocol):
 
     async def run_hook(
         self,
-        fn: Any,
+        fn: Callable[..., Awaitable[object]],
         /,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any: ...
+        *args: object,
+        **kwargs: object,
+    ) -> object: ...
 
 
 class DirectExecutor:
@@ -77,8 +78,8 @@ class DirectExecutor:
         self,
         provider: LLMProvider,
         *,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
         model: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
@@ -97,7 +98,7 @@ class DirectExecutor:
         self,
         registry: ToolRegistry,
         name: str,
-        params: dict[str, Any],
+        params: dict[str, object],
         ctx: ToolContext | None = None,
     ) -> str:
         return await registry.execute(name, params, ctx)
@@ -107,15 +108,15 @@ class DirectExecutor:
         conversation: Conversation,
         session_id: str,
         message: str,
-        **kwargs: Any,
-    ) -> list[dict[str, Any]]:
+        **kwargs: object,
+    ) -> list[dict[str, object]]:
         return await conversation.build_prompt(session_id, message, **kwargs)
 
     async def record(
         self,
         conversation: Conversation,
         session_id: str,
-        new_messages: list[dict[str, Any]],
+        new_messages: list[dict[str, object]],
     ) -> None:
         await conversation.record(session_id, new_messages)
 
@@ -128,9 +129,9 @@ class DirectExecutor:
 
     async def run_hook(
         self,
-        fn: Any,
+        fn: Callable[..., Awaitable[object]],
         /,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
+        *args: object,
+        **kwargs: object,
+    ) -> object:
         return await fn(*args, **kwargs)

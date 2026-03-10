@@ -32,4 +32,3 @@ class MessageBus:
     async def consume_outbound(self) -> OutboundMessage:
         """Consume the next outbound message (blocks until available)."""
         return await self.outbound.get()
-

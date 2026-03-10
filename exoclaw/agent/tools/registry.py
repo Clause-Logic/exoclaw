@@ -1,7 +1,5 @@
 """Tool registry for dynamic tool management."""
 
-from typing import Any
-
 from exoclaw.agent.tools.protocol import Tool, ToolContext
 
 
@@ -31,7 +29,7 @@ class ToolRegistry:
         """Check if a tool is registered."""
         return name in self._tools
 
-    def get_definitions(self) -> list[dict[str, Any]]:
+    def get_definitions(self) -> list[dict[str, object]]:
         """Get all tool definitions in OpenAI format."""
         return [
             {
@@ -46,7 +44,7 @@ class ToolRegistry:
         ]
 
     async def execute(
-        self, name: str, params: dict[str, Any], ctx: ToolContext | None = None
+        self, name: str, params: dict[str, object], ctx: ToolContext | None = None
     ) -> str:
         """Execute a tool by name with given parameters.
 
@@ -54,7 +52,7 @@ class ToolRegistry:
         instead of execute(**kwargs). Falls back to execute() if not implemented or
         ctx is None.
         """
-        _HINT = "\n\n[Analyze the error above and try a different approach.]"
+        _hint = "\n\n[Analyze the error above and try a different approach.]"
 
         tool = self._tools.get(name)
         if not tool:
@@ -66,16 +64,18 @@ class ToolRegistry:
             if hasattr(tool, "validate_params"):
                 errors: list[str] = getattr(tool, "validate_params")(params)
                 if errors:
-                    return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _HINT
+                    return (
+                        f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
+                    )
             if ctx is not None and hasattr(tool, "execute_with_context"):
                 result: str = await getattr(tool, "execute_with_context")(ctx, **params)
             else:
                 result = await tool.execute(**params)
             if isinstance(result, str) and result.startswith("Error"):
-                return result + _HINT
+                return result + _hint
             return result
         except Exception as e:
-            return f"Error executing {name}: {str(e)}" + _HINT
+            return f"Error executing {name}: {str(e)}" + _hint
 
     @property
     def tool_names(self) -> list[str]:

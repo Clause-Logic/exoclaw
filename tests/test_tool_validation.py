@@ -1,5 +1,3 @@
-from typing import Any
-
 from exoclaw.agent.tools.protocol import ToolBase as Tool
 from exoclaw.agent.tools.registry import ToolRegistry
 
@@ -14,7 +12,7 @@ class SampleTool(Tool):
         return "sample tool"
 
     @property
-    def parameters(self) -> dict[str, Any]:
+    def parameters(self) -> dict[str, object]:
         return {
             "type": "object",
             "properties": {
@@ -36,7 +34,7 @@ class SampleTool(Tool):
             "required": ["query", "count"],
         }
 
-    async def execute(self, **kwargs: Any) -> str:
+    async def execute(self, **kwargs: object) -> str:
         return "ok"
 
 
@@ -94,7 +92,7 @@ async def test_registry_returns_validation_error() -> None:
 class CastTestTool(Tool):
     """Minimal tool for testing cast_params."""
 
-    def __init__(self, schema: dict[str, Any]) -> None:
+    def __init__(self, schema: dict[str, object]) -> None:
         self._schema = schema
 
     @property
@@ -106,10 +104,10 @@ class CastTestTool(Tool):
         return "test tool for casting"
 
     @property
-    def parameters(self) -> dict[str, Any]:
+    def parameters(self) -> dict[str, object]:
         return self._schema
 
-    async def execute(self, **kwargs: Any) -> str:
+    async def execute(self, **kwargs: object) -> str:
         return "ok"
 
 
@@ -178,8 +176,8 @@ def test_cast_params_nested_object() -> None:
         }
     )
     result = tool.cast_params({"config": {"port": "8080", "debug": "true"}})
-    assert result["config"]["port"] == 8080
-    assert result["config"]["debug"] is True
+    assert result["config"]["port"] == 8080  # type: ignore[index]
+    assert result["config"]["debug"] is True  # type: ignore[index]
 
 
 def test_cast_params_bool_not_cast_to_int() -> None:

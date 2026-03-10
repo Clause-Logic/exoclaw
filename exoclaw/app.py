@@ -17,7 +17,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
@@ -29,6 +29,7 @@ from exoclaw.channels.protocol import Channel
 from exoclaw.executor import Executor
 
 if TYPE_CHECKING:
+    from exoclaw.agent.loop import AgentLoop
     from exoclaw.providers.protocol import LLMProvider
 
 
@@ -51,7 +52,7 @@ class Exoclaw:
         max_iterations: int = 40,
         reasoning_effort: str | None = None,
         executor: Executor | None = None,
-    ):
+    ) -> None:
         self.provider = provider
         self.executor = executor
         self.conversation = conversation
@@ -64,7 +65,7 @@ class Exoclaw:
         self.max_iterations = max_iterations
         self.reasoning_effort = reasoning_effort
 
-    def _build(self) -> tuple[Any, Any, Any]:
+    def _build(self) -> tuple[Bus, AgentLoop, ChannelManager]:
         """Instantiate all internal components. Called once at run time."""
         from exoclaw.agent.loop import AgentLoop
 
@@ -72,6 +73,7 @@ class Exoclaw:
             bus = self.bus
         else:
             from exoclaw.bus.queue import MessageBus
+
             bus = MessageBus()
 
         model = self.model or self.provider.get_default_model()

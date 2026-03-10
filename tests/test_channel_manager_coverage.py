@@ -5,14 +5,12 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from exoclaw.bus.events import OutboundMessage
 from exoclaw.bus.queue import MessageBus
 from exoclaw.channels.manager import ChannelManager
 
 
-def _make_channel(name="test"):
+def _make_channel(name: str = "test") -> MagicMock:
     ch = MagicMock()
     ch.name = name
     ch.start = AsyncMock()
@@ -21,7 +19,7 @@ def _make_channel(name="test"):
     return ch
 
 
-def _make_manager(channels=None):
+def _make_manager(channels: list[MagicMock] | None = None) -> tuple[ChannelManager, MessageBus]:
     bus = MessageBus()
     chs = channels or []
     manager = ChannelManager(chs, bus)
@@ -29,30 +27,30 @@ def _make_manager(channels=None):
 
 
 class TestRegisterAndGetChannel:
-    def test_register_adds_channel(self):
+    def test_register_adds_channel(self) -> None:
         manager, _ = _make_manager()
         ch = _make_channel("slack")
         manager.register(ch)
         assert manager.get_channel("slack") is ch
 
-    def test_get_channel_missing_returns_none(self):
+    def test_get_channel_missing_returns_none(self) -> None:
         manager, _ = _make_manager()
         assert manager.get_channel("nonexistent") is None
 
-    def test_channels_from_constructor(self):
+    def test_channels_from_constructor(self) -> None:
         ch = _make_channel("tg")
         manager, _ = _make_manager([ch])
         assert manager.get_channel("tg") is ch
 
 
 class TestStartAll:
-    async def test_start_all_no_channels(self):
+    async def test_start_all_no_channels(self) -> None:
         manager, _ = _make_manager()
         # Should return early without creating dispatch task
         await manager.start_all()
         assert manager._dispatch_task is None
 
-    async def test_start_all_with_channels(self):
+    async def test_start_all_with_channels(self) -> None:
         ch = _make_channel("slack")
         manager, _ = _make_manager([ch])
 
@@ -64,7 +62,7 @@ class TestStartAll:
 
         ch.start.assert_called_once()
 
-    async def test_start_all_creates_dispatch_task(self):
+    async def test_start_all_creates_dispatch_task(self) -> None:
         ch = _make_channel("slack")
         manager, _ = _make_manager([ch])
 
@@ -76,14 +74,14 @@ class TestStartAll:
 
 
 class TestStopAll:
-    async def test_stop_all_no_dispatch_task(self):
+    async def test_stop_all_no_dispatch_task(self) -> None:
         ch = _make_channel("slack")
         manager, _ = _make_manager([ch])
         # stop_all without ever calling start_all — no dispatch task
         await manager.stop_all()
         ch.stop.assert_called_once()
 
-    async def test_stop_all_cancels_dispatch_task(self):
+    async def test_stop_all_cancels_dispatch_task(self) -> None:
         ch = _make_channel("slack")
         manager, _ = _make_manager([ch])
 
@@ -96,7 +94,7 @@ class TestStopAll:
 
         assert manager._dispatch_task.cancelled() or manager._dispatch_task.done()
 
-    async def test_stop_all_channel_stop_raises(self):
+    async def test_stop_all_channel_stop_raises(self) -> None:
         ch = _make_channel("slack")
         ch.stop = AsyncMock(side_effect=RuntimeError("stop error"))
         manager, _ = _make_manager([ch])
@@ -105,7 +103,7 @@ class TestStopAll:
 
 
 class TestDispatchOutbound:
-    async def test_message_routed_to_known_channel(self):
+    async def test_message_routed_to_known_channel(self) -> None:
         ch = _make_channel("slack")
         manager, bus = _make_manager([ch])
 
@@ -123,7 +121,7 @@ class TestDispatchOutbound:
 
         ch.send.assert_called_once_with(msg)
 
-    async def test_message_to_unknown_channel(self):
+    async def test_message_to_unknown_channel(self) -> None:
         ch = _make_channel("slack")
         manager, bus = _make_manager([ch])
 
@@ -140,11 +138,13 @@ class TestDispatchOutbound:
 
         ch.send.assert_not_called()
 
-    async def test_progress_message_still_routed(self):
+    async def test_progress_message_still_routed(self) -> None:
         ch = _make_channel("slack")
         manager, bus = _make_manager([ch])
 
-        msg = OutboundMessage(channel="slack", chat_id="c1", content="...", metadata={"_progress": True})
+        msg = OutboundMessage(
+            channel="slack", chat_id="c1", content="...", metadata={"_progress": True}
+        )
         await bus.publish_outbound(msg)
 
         task = asyncio.create_task(manager._dispatch_outbound())
@@ -157,7 +157,7 @@ class TestDispatchOutbound:
 
         ch.send.assert_called_once_with(msg)
 
-    async def test_channel_send_raises_does_not_crash_loop(self):
+    async def test_channel_send_raises_does_not_crash_loop(self) -> None:
         ch = _make_channel("slack")
         ch.send = AsyncMock(side_effect=RuntimeError("network error"))
         manager, bus = _make_manager([ch])
@@ -176,7 +176,7 @@ class TestDispatchOutbound:
         # The loop should have survived the exception
         ch.send.assert_called_once()
 
-    async def test_dispatch_stops_on_cancelled_error(self):
+    async def test_dispatch_stops_on_cancelled_error(self) -> None:
         manager, _ = _make_manager()
         task = asyncio.create_task(manager._dispatch_outbound())
         await asyncio.sleep(0.05)
@@ -186,13 +186,13 @@ class TestDispatchOutbound:
 
 
 class TestStartChannel:
-    async def test_start_channel_success(self):
+    async def test_start_channel_success(self) -> None:
         ch = _make_channel("slack")
         manager, bus = _make_manager()
         await manager._start_channel("slack", ch)
         ch.start.assert_called_once_with(bus)
 
-    async def test_start_channel_exception_does_not_raise(self):
+    async def test_start_channel_exception_does_not_raise(self) -> None:
         ch = _make_channel("slack")
         ch.start = AsyncMock(side_effect=RuntimeError("connect failed"))
         manager, _ = _make_manager()

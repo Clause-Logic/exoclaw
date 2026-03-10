@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# mise description="Bump version, commit, push, tag, and push tag"
+set -euo pipefail
+
+VERSION="${1:-}"
+if [[ -z "$VERSION" ]]; then
+  echo "Usage: mise run release <version>  (e.g. mise run release 0.2.3)" >&2
+  exit 1
+fi
+
+# Must be on main
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$BRANCH" != "main" ]]; then
+  echo "Error: must be on main (currently on $BRANCH)" >&2
+  exit 1
+fi
+
+# Fetch and check up to date
+git fetch origin main --quiet
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse origin/main)
+if [[ "$LOCAL" != "$REMOTE" ]]; then
+  echo "Error: branch is not up to date with origin/main — run git pull first" >&2
+  exit 1
+fi
+
+# No uncommitted changes
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Error: uncommitted changes present — commit or stash first" >&2
+  exit 1
+fi
+
+# Tag must not already exist
+if git rev-parse "v${VERSION}" &>/dev/null; then
+  echo "Error: tag v${VERSION} already exists" >&2
+  exit 1
+fi
+
+echo "Releasing v${VERSION}..."
+
+# Bump version in pyproject.toml
+sed -i '' "s/^version = \".*\"/version = \"${VERSION}\"/" pyproject.toml
+
+git add pyproject.toml
+git commit -m "chore: bump version to ${VERSION}"
+git push origin main
+
+git tag "v${VERSION}"
+git push origin "v${VERSION}"
+
+echo "Done — v${VERSION} tagged and pushed. GitHub Actions will publish to PyPI."

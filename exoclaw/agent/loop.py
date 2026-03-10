@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 
 from loguru import logger
 
@@ -357,7 +357,10 @@ class AgentLoop:
 
         # Use _bus_progress only when no on_progress was explicitly provided.
         # An explicit None means "run silently" (e.g. cron jobs via process_direct).
-        effective_progress = _bus_progress if on_progress is _UNSET else on_progress
+        effective_progress: Callable[..., Awaitable[None]] | None = (
+            _bus_progress if on_progress is _UNSET
+            else cast(Callable[..., Awaitable[None]] | None, on_progress)
+        )
         final_content, _, all_msgs = await self._run_agent_loop(
             initial, on_progress=effective_progress,
         )

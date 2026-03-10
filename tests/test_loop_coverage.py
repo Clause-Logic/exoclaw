@@ -372,6 +372,68 @@ class TestProcessMessage:
         await loop._process_message(msg)
         tool.on_inbound.assert_called_once_with(msg)
 
+    async def test_bus_progress_used_when_on_progress_not_provided(self):
+        """When called without on_progress (bus dispatch path), tool hints go to the bus."""
+        loop, bus = _make_loop()
+
+        r = _make_response(has_tool_calls=True)
+        tc = MagicMock()
+        tc.id = "t1"
+        tc.name = "read_file"
+        tc.arguments = {"path": "foo.txt"}
+        r.tool_calls = [tc]
+        loop.tools.execute = AsyncMock(return_value="file contents")
+
+        final = _make_response(content="done")
+        loop.provider.chat = AsyncMock(side_effect=[r, final])
+
+        outbound: list[OutboundMessage] = []
+        original_publish = bus.publish_outbound
+
+        async def capture(msg):
+            outbound.append(msg)
+            await original_publish(msg)
+
+        bus.publish_outbound = capture
+
+        msg = InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="go")
+        # Called without on_progress — sentinel _UNSET → _bus_progress used
+        await loop._process_message(msg)
+
+        progress_msgs = [m for m in outbound if m.metadata and m.metadata.get("_progress")]
+        assert progress_msgs, "Expected progress messages to be published to the bus"
+
+    async def test_explicit_none_on_progress_suppresses_bus_progress(self):
+        """When on_progress=None is passed explicitly (silent path), no progress hits the bus."""
+        loop, bus = _make_loop()
+
+        r = _make_response(has_tool_calls=True)
+        tc = MagicMock()
+        tc.id = "t1"
+        tc.name = "read_file"
+        tc.arguments = {"path": "foo.txt"}
+        r.tool_calls = [tc]
+        loop.tools.execute = AsyncMock(return_value="file contents")
+
+        final = _make_response(content="done")
+        loop.provider.chat = AsyncMock(side_effect=[r, final])
+
+        outbound: list[OutboundMessage] = []
+        original_publish = bus.publish_outbound
+
+        async def capture(msg):
+            outbound.append(msg)
+            await original_publish(msg)
+
+        bus.publish_outbound = capture
+
+        msg = InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="go")
+        # Explicit None → silent, no _bus_progress
+        await loop._process_message(msg, on_progress=None)
+
+        progress_msgs = [m for m in outbound if m.metadata and m.metadata.get("_progress")]
+        assert not progress_msgs, "Expected no progress messages when on_progress=None"
+
 
 # ---------------------------------------------------------------------------
 # process_direct

@@ -17,6 +17,9 @@ from exoclaw.bus.protocol import Bus
 from exoclaw.providers.protocol import LLMProvider
 
 
+_UNSET: object = object()  # sentinel: distinguishes "not provided" from explicit None
+
+
 class AgentLoop:
     """
     The agent loop is the core processing engine.
@@ -288,7 +291,7 @@ class AgentLoop:
         self,
         msg: InboundMessage,
         session_key: str | None = None,
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[[str], Awaitable[None]] | None | object = _UNSET,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -348,8 +351,11 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
+        # Use _bus_progress only when no on_progress was explicitly provided.
+        # An explicit None means "run silently" (e.g. cron jobs via process_direct).
+        effective_progress = _bus_progress if on_progress is _UNSET else on_progress
         final_content, _, all_msgs = await self._run_agent_loop(
-            initial, on_progress=on_progress or _bus_progress,
+            initial, on_progress=effective_progress,
         )
 
         if final_content is None:

@@ -14,6 +14,7 @@ from exoclaw.agent.tools.protocol import Tool, ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.bus.events import InboundMessage, OutboundMessage
 from exoclaw.bus.protocol import Bus
+from exoclaw.executor import DirectExecutor, Executor
 from exoclaw.providers.protocol import LLMProvider
 
 
@@ -50,8 +51,10 @@ class AgentLoop:
         on_pre_tool: Callable[[str, dict[str, Any], str], Awaitable[str | None]] | None = None,
         on_post_turn: Callable[[list[dict[str, Any]], str, str, str], Awaitable[None]] | None = None,
         on_max_iterations: Callable[[str, str, str], Awaitable[None]] | None = None,
+        executor: Executor | None = None,
     ):
         self.bus = bus
+        self._executor: Executor = executor or DirectExecutor()
         self.provider = provider
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
@@ -127,7 +130,8 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
-            response = await self.provider.chat(
+            response = await self._executor.chat(
+                self.provider,
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model,
@@ -169,14 +173,14 @@ class AgentLoop:
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     if self._on_pre_tool:
                         sk = self._current_ctx.session_key if self._current_ctx else ""
-                        rejection = await self._on_pre_tool(tool_call.name, tool_call.arguments, sk)
+                        rejection = await self._executor.run_hook(self._on_pre_tool, tool_call.name, tool_call.arguments, sk)
                         if rejection:
                             logger.info("on_pre_tool rejected {}: {}", tool_call.name, rejection[:100])
                             result = rejection
                         else:
-                            result = await self.tools.execute(tool_call.name, tool_call.arguments, self._current_ctx)
+                            result = await self._executor.execute_tool(self.tools, tool_call.name, tool_call.arguments, self._current_ctx)
                     else:
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments, self._current_ctx)
+                        result = await self._executor.execute_tool(self.tools, tool_call.name, tool_call.arguments, self._current_ctx)
                     messages = [
                         *messages,
                         {"role": "tool", "tool_call_id": tool_call.id,
@@ -301,9 +305,9 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             sid = f"{channel}:{chat_id}"
             plugin_ctx = self._collect_plugin_context()
-            initial = await self.conversation.build_prompt(sid, msg.content, channel=channel, chat_id=chat_id, plugin_context=plugin_ctx or None)
+            initial = await self._executor.build_prompt(self.conversation, sid, msg.content, channel=channel, chat_id=chat_id, plugin_context=plugin_ctx or None)
             final_content, _, all_msgs = await self._run_agent_loop(initial)
-            await self.conversation.record(sid, all_msgs[len(initial) - 1:])
+            await self._executor.record(self.conversation, sid, all_msgs[len(initial) - 1:])
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                    content=final_content or "Background task completed.")
 
@@ -315,7 +319,7 @@ class AgentLoop:
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            success = await self.conversation.clear(sid)
+            success = await self._executor.clear(self.conversation, sid)
             content = "New session started." if success else (
                 "Memory archival failed, session not cleared. Please try again."
             )
@@ -332,12 +336,12 @@ class AgentLoop:
 
         plugin_ctx = self._collect_plugin_context()
         if self._on_pre_context:
-            extra = await self._on_pre_context(msg.content, sid, msg.channel, msg.chat_id)
+            extra = await self._executor.run_hook(self._on_pre_context, msg.content, sid, msg.channel, msg.chat_id)
             if extra:
                 plugin_ctx.append(extra)
 
-        initial = await self.conversation.build_prompt(
-            sid, msg.content,
+        initial = await self._executor.build_prompt(
+            self.conversation, sid, msg.content,
             channel=msg.channel, chat_id=msg.chat_id,
             media=msg.media if msg.media else None,
             plugin_context=plugin_ctx or None,
@@ -363,7 +367,7 @@ class AgentLoop:
 
         # new_msgs = user message + everything the loop added
         new_msgs = all_msgs[len(initial) - 1:]
-        await self.conversation.record(sid, new_msgs)
+        await self._executor.record(self.conversation, sid, new_msgs)
         if self._on_post_turn and new_msgs:
             asyncio.ensure_future(self._on_post_turn(new_msgs, sid, msg.channel, msg.chat_id))
 

@@ -1,6 +1,6 @@
 # Running exoclaw in Temporal
 
-This document captures what would need to change to run exoclaw inside a [Temporal](https://temporal.io) workflow engine, based on a design exploration against the openclaw reference implementation.
+This document captures how to run exoclaw inside a [Temporal](https://temporal.io) workflow engine.
 
 ## Why it fits
 
@@ -10,15 +10,13 @@ The `AgentLoop` turn is already shaped like a Temporal workflow — pure orchest
 build_prompt → call LLM → [execute tools]* → record → reply
 ```
 
-The five exoclaw protocols map cleanly to Temporal primitives. The main work is adding two new protocols and replacing one signature.
+The five exoclaw protocols map cleanly to Temporal primitives. The `Executor` protocol in core provides the seam — implement it for your execution environment and everything else stays the same.
 
 ---
 
 ## What survives unchanged
 
-- `LLMProvider`, `Conversation`, `Tool` — untouched. Called from Temporal activities instead of directly from the loop, but implementations don't change.
-- `Channel` protocol shape (`start`, `stop`, `send`) — shape stays, signature of `start` changes (see below).
-- `Bus` — stays but becomes internal-only. The loop still uses it internally; channels no longer touch it.
+- `LLMProvider`, `Conversation`, `Tool`, `Channel`, `Bus` — **all untouched**. No protocol changes, no signature changes.
 - Hook callbacks (`on_pre_context`, `on_pre_tool`, `on_post_turn`, `on_max_iterations`) — already shaped like activities. No changes.
 - `system_context()` on tools — sync, called in workflow code before `build_prompt`. No changes.
 - Conversation JSONL storage — unchanged, just called via an activity.
@@ -26,149 +24,121 @@ The five exoclaw protocols map cleanly to Temporal primitives. The main work is 
 
 ---
 
-## Two new protocols
+## The Executor protocol
 
-### 1. `Executor`
-
-The seam between "call this directly" and "call this as a Temporal activity". Makes the loop environment-agnostic.
+The `Executor` protocol is the only new protocol in core. It has one method per I/O operation, giving the implementation full control over how each operation is executed (timeout policies, retry strategies, task queue routing):
 
 ```python
 class Executor(Protocol):
-    async def run(self, fn: Callable, /, *args: Any, **kwargs: Any) -> Any: ...
+    async def chat(self, provider, *, messages, tools, model, temperature, max_tokens, reasoning_effort) -> LLMResponse: ...
+    async def execute_tool(self, registry, name, params, ctx) -> str: ...
+    async def build_prompt(self, conversation, session_id, message, **kwargs) -> list[dict]: ...
+    async def record(self, conversation, session_id, new_messages) -> None: ...
+    async def clear(self, conversation, session_id) -> bool: ...
+    async def run_hook(self, fn, /, *args, **kwargs) -> Any: ...
 ```
 
-Two implementations:
+The default `DirectExecutor` calls everything inline — zero behavior change for existing users. Pass `executor=` to `AgentLoop` or `Exoclaw` to swap it.
+
+A Temporal implementation would look like:
 
 ```python
-class DirectExecutor:
-    async def run(self, fn, /, *args, **kwargs):
-        return await fn(*args, **kwargs)
-
 class TemporalExecutor:
-    async def run(self, fn, /, *args, **kwargs):
-        return await workflow.execute_activity(fn, *args, **kwargs)
-```
+    async def chat(self, provider, **kwargs):
+        return await workflow.execute_activity(
+            llm_chat_activity, kwargs,
+            start_to_close_timeout=timedelta(minutes=5),
+        )
 
-The loop replaces every I/O `await` with `self.executor.run(...)`:
+    async def execute_tool(self, registry, name, params, ctx):
+        return await workflow.execute_activity(
+            tool_activity, (name, params, ctx),
+            start_to_close_timeout=timedelta(minutes=10),
+            heartbeat_timeout=timedelta(seconds=30),
+        )
 
-| current | via executor |
-|---|---|
-| `await self.provider.chat(...)` | `await self.executor.run(self.provider.chat, ...)` |
-| `await self.conversation.build_prompt(...)` | `await self.executor.run(self.conversation.build_prompt, ...)` |
-| `await self.tools.execute(...)` | `await self.executor.run(self.tools.execute, ...)` |
-| `await self.conversation.record(...)` | `await self.executor.run(self.conversation.record, ...)` |
-| `await self._on_pre_context(...)` | `await self.executor.run(self._on_pre_context, ...)` |
-| `await self._on_pre_tool(...)` | `await self.executor.run(self._on_pre_tool, ...)` |
+    async def build_prompt(self, conversation, session_id, message, **kwargs):
+        return await workflow.execute_activity(
+            build_prompt_activity, (session_id, message, kwargs),
+            start_to_close_timeout=timedelta(seconds=30),
+        )
 
-Same loop, same protocols, same implementations. Swap the executor and you're in a different runtime.
+    async def record(self, conversation, session_id, new_messages):
+        await workflow.execute_activity(
+            record_activity, (session_id, new_messages),
+            start_to_close_timeout=timedelta(seconds=30),
+        )
 
----
+    async def clear(self, conversation, session_id):
+        return await workflow.execute_activity(
+            clear_activity, session_id,
+            start_to_close_timeout=timedelta(seconds=30),
+        )
 
-### 2. `Dispatcher`
-
-The current channel model is decoupled: a channel publishes inbound via the bus, then the loop separately consumes outbound and calls `channel.send()`. That's a queue model.
-
-Temporal Updates are coupled — you submit a message and get the response back on the same call. A `Dispatcher` protocol abstracts this:
-
-```python
-class Dispatcher(Protocol):
-    async def dispatch(self, msg: InboundMessage) -> str: ...
-```
-
-Two implementations:
-
-```python
-class BusDispatcher:
-    """Direct mode: publish to bus, wait for outbound response."""
-    async def dispatch(self, msg: InboundMessage) -> str:
-        await self._bus.publish_inbound(msg)
-        response = await self._bus.consume_outbound()
-        return response.content
-
-class TemporalDispatcher:
-    """Temporal mode: send an Update, get the response back directly."""
-    async def dispatch(self, msg: InboundMessage) -> str:
-        return await self._workflow_handle.execute_update(
-            SessionWorkflow.send_message, msg
+    async def run_hook(self, fn, /, *args, **kwargs):
+        return await workflow.execute_local_activity(
+            hook_activity, (fn, args, kwargs),
+            start_to_close_timeout=timedelta(seconds=10),
         )
 ```
 
-`Channel.start(bus: Bus)` becomes `Channel.start(dispatcher: Dispatcher)`. The channel calls `dispatcher.dispatch(msg)` instead of `bus.publish_inbound(msg)`, and never needs to consume outbound itself — the Dispatcher owns that.
+Each method gets its own timeout, retry policy, and task queue routing. `chat` gets a long timeout; `execute_tool` gets heartbeating for long-running tools; `run_hook` uses local activities for low-latency callbacks.
 
 ---
 
-## One signature change
+## Dispatch model
+
+The existing `process_direct()` method on `AgentLoop` already provides a coupled request-response interface:
 
 ```python
-# before
-async def start(self, bus: Bus) -> None: ...
-
-# after
-async def start(self, dispatcher: Dispatcher) -> None: ...
+result = await loop.process_direct("do something", session_key="s:1")
 ```
 
-Channel implementations (Telegram, IPC, etc.) change the argument they receive and call `dispatcher.dispatch(msg)` instead of `bus.publish_inbound(msg)`. Everything else in the channel stays the same.
-
----
-
-## What goes away
-
-| current | replacement |
-|---|---|
-| Outer `while self._running` loop in `AgentLoop.run()` | Temporal dispatches to the workflow |
-| `MessageBus` at the channel boundary | `Dispatcher` protocol |
-| Cron JSON file (`exoclaw-tools-cron` storage) | Temporal cron child workflows |
-| `_active_tasks` dict + `cancel_by_session` | Temporal child workflow cancellation handles |
-| `asyncio.Lock`, `asyncio.create_task`, `asyncio.ensure_future` in the loop | Temporal's own scheduler |
-
----
-
-## Workflow structure
-
-### Per-turn (simpler)
-
-Each inbound message starts a new workflow. Session state lives entirely in the `Conversation` implementation (external storage).
+A Temporal workflow can call this through an activity directly. No new `Dispatcher` protocol is needed in core — the dispatch model is a Temporal-layer concern:
 
 ```python
 @workflow.defn
 class AgentTurnWorkflow:
     @workflow.run
     async def run(self, input: TurnInput) -> str:
-        messages = await workflow.execute_activity(build_prompt, input)
-        response = await workflow.execute_activity(llm_chat, messages)
-
-        while response.has_tool_calls:
-            for call in response.tool_calls:
-                result = await workflow.execute_activity(execute_tool, call)
-                messages = append_tool_result(messages, call, result)
-            response = await workflow.execute_activity(llm_chat, messages)
-
-        await workflow.execute_activity(record_turn, messages)
-        return response.content
+        return await workflow.execute_activity(
+            process_turn_activity, input,
+            start_to_close_timeout=timedelta(minutes=15),
+        )
 ```
 
-### Long-running session (more powerful)
-
-One workflow per session, receives messages via Updates. Temporal's event history is the source of truth for in-flight state.
+For long-running session workflows with Updates, the Temporal package provides its own dispatcher that wraps `process_direct()`:
 
 ```python
 @workflow.defn
 class SessionWorkflow:
-    def __init__(self):
-        self._queue: list[InboundMessage] = []
-
     @workflow.update
     async def send_message(self, msg: InboundMessage) -> str:
-        # Run the turn, return the response
-        return await self._process_turn(msg)
+        return await workflow.execute_activity(
+            process_turn_activity, msg,
+            start_to_close_timeout=timedelta(minutes=15),
+        )
 
     @workflow.run
     async def run(self, session_id: str) -> None:
-        # Long-running; terminated explicitly when session ends
         await workflow.wait_condition(lambda: False, timeout=timedelta(days=365))
 ```
 
-The `send_message` Update is what the `TemporalDispatcher` calls. The caller blocks until the turn completes and gets the response back directly.
+Channels that want to talk to a Temporal-backed agent use the Temporal client SDK to send Updates. Channels that don't want Temporal keep using the Bus as before. No protocol changes needed.
+
+---
+
+## What goes away (in Temporal mode)
+
+These components are replaced by Temporal equivalents in the Temporal package, but remain available for non-Temporal deployments:
+
+| current | Temporal replacement |
+|---|---|
+| Outer `while self._running` loop in `AgentLoop.run()` | Temporal dispatches to the workflow |
+| `MessageBus` at the channel boundary | Temporal Updates |
+| Cron JSON file (`exoclaw-tools-cron` storage) | Temporal cron child workflows |
+| `_active_tasks` dict + `cancel_by_session` | Temporal child workflow cancellation handles |
+| `asyncio.Lock`, `asyncio.create_task`, `asyncio.ensure_future` in the loop | Temporal's own scheduler |
 
 ---
 
@@ -214,11 +184,11 @@ The sandbox is guaranteed to be cleaned up when the session workflow ends, even 
 
 | change | scope |
 |---|---|
-| New `Executor` protocol | core (exoclaw) |
-| New `Dispatcher` protocol | core (exoclaw) |
-| `Channel.start(bus)` → `Channel.start(dispatcher)` | protocol + all channel impls |
-| `AgentLoop` accepts `executor: Executor` | core (exoclaw) |
-| Loop `await x()` → `await self.executor.run(x, ...)` | core (exoclaw) |
-| Channel impls call `dispatcher.dispatch()` not `bus.publish_inbound()` | all channel packages |
+| `Executor` protocol + `DirectExecutor` | core (exoclaw) — **already landed** |
+| `AgentLoop` accepts optional `executor: Executor` | core (exoclaw) — **already landed** |
+| `Exoclaw` accepts optional `executor: Executor` | core (exoclaw) — **already landed** |
+| `TemporalExecutor` implementation | temporal package (external) |
+| Workflow definitions (`AgentTurnWorkflow`, `SessionWorkflow`) | temporal package (external) |
+| Activity wrappers for LLM, tools, conversation | temporal package (external) |
 
-Everything else — all five existing protocols, all plugin implementations, all storage — survives without changes.
+**No existing protocols, channel implementations, tool implementations, or provider implementations need to change.** The Executor is opt-in — pass one to get a different execution environment, or don't and everything works as before.

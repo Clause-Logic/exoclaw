@@ -26,6 +26,7 @@ from exoclaw.agent.tools.protocol import Tool
 from exoclaw.bus.protocol import Bus
 from exoclaw.channels.manager import ChannelManager
 from exoclaw.channels.protocol import Channel
+from exoclaw.executor import Executor
 
 if TYPE_CHECKING:
     from exoclaw.providers.protocol import LLMProvider
@@ -49,8 +50,10 @@ class Exoclaw:
         max_tokens: int = 8192,
         max_iterations: int = 40,
         reasoning_effort: str | None = None,
+        executor: Executor | None = None,
     ):
         self.provider = provider
+        self.executor = executor
         self.conversation = conversation
         self.channels = channels or []
         self.tools = tools or []
@@ -83,6 +86,7 @@ class Exoclaw:
             max_iterations=self.max_iterations,
             reasoning_effort=self.reasoning_effort,
             tools=self.tools,
+            executor=self.executor,
         )
 
         channel_manager = ChannelManager(self.channels, bus)

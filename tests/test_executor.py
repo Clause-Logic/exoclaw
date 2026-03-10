@@ -80,6 +80,8 @@ class TestDirectExecutorBuildPrompt:
             "hello",
             channel="cli",
             chat_id="1",
+            media=None,
+            plugin_context=None,
         )
 
 

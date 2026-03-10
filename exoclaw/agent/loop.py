@@ -75,7 +75,7 @@ class AgentLoop:
         for tool in self._extra_tools:
             self.tools.register(tool)
             if hasattr(tool, "set_bus"):
-                tool.set_bus(self.bus)
+                tool.set_bus(self.bus)  # type: ignore[call-non-callable]
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task[None]]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
@@ -85,7 +85,7 @@ class AgentLoop:
         """Let tools that care about inbound messages update their state."""
         for tool in self.tools._tools.values():
             if hasattr(tool, "on_inbound"):
-                tool.on_inbound(msg)
+                tool.on_inbound(msg)  # type: ignore[call-non-callable]
 
     def _collect_plugin_context(self) -> list[str]:
         """Collect system_context() strings from tools that provide them."""
@@ -93,7 +93,7 @@ class AgentLoop:
         for tool in self.tools._tools.values():
             if hasattr(tool, "system_context"):
                 try:
-                    result = tool.system_context()
+                    result = tool.system_context()  # type: ignore[call-non-callable]
                     if result and isinstance(result, str):
                         ctx.append(result)
                 except Exception:
@@ -210,12 +210,12 @@ class AgentLoop:
                     logger.error("LLM returned error: {}", (clean or "")[:200])
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
-                msg = {"role": "assistant", "content": clean}
+                msg2: dict[str, object] = {"role": "assistant", "content": clean}
                 if response.reasoning_content is not None:
-                    msg["reasoning_content"] = response.reasoning_content
+                    msg2["reasoning_content"] = response.reasoning_content
                 if response.thinking_blocks:
-                    msg["thinking_blocks"] = response.thinking_blocks
-                messages = [*messages, msg]
+                    msg2["thinking_blocks"] = response.thinking_blocks
+                messages = [*messages, msg2]
                 final_content = clean
                 break
 
@@ -277,7 +277,7 @@ class AgentLoop:
         sub_cancelled = 0
         for tool in self.tools._tools.values():
             if hasattr(tool, "cancel_by_session"):
-                sub_cancelled += await tool.cancel_by_session(msg.session_key)
+                sub_cancelled += await tool.cancel_by_session(msg.session_key)  # type: ignore[call-non-callable]
         total = cancelled + sub_cancelled
         content = f"⏹ Stopped {total} task(s)." if total else "No active task to stop."
         await self.bus.publish_outbound(

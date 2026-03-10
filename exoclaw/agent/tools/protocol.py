@@ -84,15 +84,17 @@ class ToolBase:
         """Cast an object (dict) according to schema."""
         if not isinstance(obj, dict):
             return cast(dict[str, object], obj)
+        obj_dict = cast(dict[str, object], obj)
         props = schema.get("properties", {})
         result: dict[str, object] = {}
         if not isinstance(props, dict):
-            return dict(obj)
-        for key, value in obj.items():
-            if key in props:
-                prop_schema = props[key]
+            return dict(obj_dict)
+        props_dict = cast(dict[str, object], props)
+        for key, value in obj_dict.items():
+            if key in props_dict:
+                prop_schema = props_dict[key]
                 if isinstance(prop_schema, dict):
-                    result[key] = self._cast_value(value, prop_schema)
+                    result[key] = self._cast_value(value, cast(dict[str, object], prop_schema))
                 else:
                     result[key] = value
             else:
@@ -102,6 +104,8 @@ class ToolBase:
     def _cast_value(self, val: object, schema: dict[str, object]) -> object:
         """Cast a single value according to schema."""
         target_type = schema.get("type")
+        if not isinstance(target_type, str):
+            return val
 
         if target_type == "boolean" and isinstance(val, bool):
             return val
@@ -143,7 +147,7 @@ class ToolBase:
         if target_type == "array" and isinstance(val, list):
             item_schema = schema.get("items")
             if isinstance(item_schema, dict):
-                return [self._cast_value(item, item_schema) for item in val]
+                return [self._cast_value(item, cast(dict[str, object], item_schema)) for item in val]
             return val
 
         if target_type == "object" and isinstance(val, dict):
@@ -162,17 +166,19 @@ class ToolBase:
 
     def _validate(self, val: object, schema: dict[str, object], path: str) -> list[str]:
         t, label = schema.get("type"), path or "parameter"
+        if not isinstance(t, str):
+            t = None
         if t == "integer" and (not isinstance(val, int) or isinstance(val, bool)):
             return [f"{label} should be integer"]
         if t == "number" and (
-            not isinstance(val, self._TYPE_MAP[t]) or isinstance(val, bool)  # type: ignore[literal-required]
+            not isinstance(val, self._TYPE_MAP[t]) or isinstance(val, bool)
         ):
             return [f"{label} should be number"]
         if (
             t in self._TYPE_MAP
             and t not in ("integer", "number")
             and not isinstance(val, self._TYPE_MAP[t])
-        ):  # type: ignore[literal-required]
+        ):
             return [f"{label} should be {t}"]
 
         errors = []
@@ -194,26 +200,29 @@ class ToolBase:
             if max_length is not None and isinstance(max_length, int) and len(val) > max_length:
                 errors.append(f"{label} must be at most {max_length} chars")
         if t == "object" and isinstance(val, dict):
+            val_dict = cast(dict[str, object], val)
             props = schema.get("properties", {})
             required = schema.get("required", [])
             if isinstance(required, list):
-                for k in required:
-                    if k not in val:
+                required_list = cast(list[str], required)
+                for k in required_list:
+                    if k not in val_dict:
                         errors.append(f"missing required {path + '.' + k if path else k}")
             if isinstance(props, dict):
-                for k, v in val.items():
-                    if k in props:
-                        prop_schema = props[k]
+                props_dict = cast(dict[str, object], props)
+                for k, v in val_dict.items():
+                    if k in props_dict:
+                        prop_schema = props_dict[k]
                         if isinstance(prop_schema, dict):
                             errors.extend(
-                                self._validate(v, prop_schema, path + "." + k if path else k)
+                                self._validate(v, cast(dict[str, object], prop_schema), path + "." + k if path else k)
                             )
         if t == "array" and "items" in schema and isinstance(val, list):
             item_schema = schema["items"]
             if isinstance(item_schema, dict):
                 for i, item in enumerate(val):
                     errors.extend(
-                        self._validate(item, item_schema, f"{path}[{i}]" if path else f"[{i}]")
+                        self._validate(item, cast(dict[str, object], item_schema), f"{path}[{i}]" if path else f"[{i}]")
                     )
         return errors
 

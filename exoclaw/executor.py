@@ -46,7 +46,11 @@ class Executor(Protocol):
         conversation: Conversation,
         session_id: str,
         message: str,
-        **kwargs: object,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        media: list[str] | None = None,
+        plugin_context: list[str] | None = None,
     ) -> list[dict[str, object]]: ...
 
     async def record(
@@ -108,9 +112,20 @@ class DirectExecutor:
         conversation: Conversation,
         session_id: str,
         message: str,
-        **kwargs: object,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        media: list[str] | None = None,
+        plugin_context: list[str] | None = None,
     ) -> list[dict[str, object]]:
-        return await conversation.build_prompt(session_id, message, **kwargs)
+        return await conversation.build_prompt(
+            session_id,
+            message,
+            channel=channel,
+            chat_id=chat_id,
+            media=media,
+            plugin_context=plugin_context,
+        )
 
     async def record(
         self,

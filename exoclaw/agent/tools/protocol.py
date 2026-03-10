@@ -147,7 +147,9 @@ class ToolBase:
         if target_type == "array" and isinstance(val, list):
             item_schema = schema.get("items")
             if isinstance(item_schema, dict):
-                return [self._cast_value(item, cast(dict[str, object], item_schema)) for item in val]
+                return [
+                    self._cast_value(item, cast(dict[str, object], item_schema)) for item in val
+                ]
             return val
 
         if target_type == "object" and isinstance(val, dict):
@@ -170,9 +172,7 @@ class ToolBase:
             t = None
         if t == "integer" and (not isinstance(val, int) or isinstance(val, bool)):
             return [f"{label} should be integer"]
-        if t == "number" and (
-            not isinstance(val, self._TYPE_MAP[t]) or isinstance(val, bool)
-        ):
+        if t == "number" and (not isinstance(val, self._TYPE_MAP[t]) or isinstance(val, bool)):
             return [f"{label} should be number"]
         if (
             t in self._TYPE_MAP
@@ -215,14 +215,22 @@ class ToolBase:
                         prop_schema = props_dict[k]
                         if isinstance(prop_schema, dict):
                             errors.extend(
-                                self._validate(v, cast(dict[str, object], prop_schema), path + "." + k if path else k)
+                                self._validate(
+                                    v,
+                                    cast(dict[str, object], prop_schema),
+                                    path + "." + k if path else k,
+                                )
                             )
         if t == "array" and "items" in schema and isinstance(val, list):
             item_schema = schema["items"]
             if isinstance(item_schema, dict):
                 for i, item in enumerate(val):
                     errors.extend(
-                        self._validate(item, cast(dict[str, object], item_schema), f"{path}[{i}]" if path else f"[{i}]")
+                        self._validate(
+                            item,
+                            cast(dict[str, object], item_schema),
+                            f"{path}[{i}]" if path else f"[{i}]",
+                        )
                     )
         return errors
 

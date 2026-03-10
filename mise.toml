@@ -1,3 +1,6 @@
+[tools]
+uv = "latest"
+
 [tasks.lint]
 description = "Type check with ty and lint with ruff"
 sources = ["exoclaw/**/*.py", "tests/**/*.py", "pyproject.toml"]

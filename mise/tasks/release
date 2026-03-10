@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mise description="Bump version, commit, push, tag, and push tag"
+#MISE description="Bump version, commit, push, tag, and push tag"
 set -euo pipefail
 
 VERSION="${1:-}"

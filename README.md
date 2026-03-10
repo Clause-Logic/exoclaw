@@ -31,7 +31,7 @@ exoclaw cuts the knot. Five protocols, one loop, ~2,000 lines. Everything else �
 
 ## How it works
 
-exoclaw is five protocols and a loop.
+exoclaw is six protocols and a loop.
 
 ```
 InboundMessage → Bus → AgentLoop → LLM → Tools → Bus → OutboundMessage → Channel
@@ -221,6 +221,40 @@ The default `MessageBus` is a pair of asyncio queues — sufficient for single-p
 **Plugin ideas:**
 - `exoclaw-bus-redis` — Redis pub/sub for multi-process or distributed agents
 - `exoclaw-bus-nats` — NATS for high-throughput pipelines
+
+---
+
+### `Executor`
+
+```python
+class Executor(Protocol):
+    async def chat(self, provider, *, messages, tools, model, temperature, max_tokens, reasoning_effort) -> LLMResponse: ...
+    async def execute_tool(self, registry, name, params, ctx) -> str: ...
+    async def build_prompt(self, conversation, session_id, message, **kwargs) -> list[dict]: ...
+    async def record(self, conversation, session_id, new_messages) -> None: ...
+    async def clear(self, conversation, session_id) -> bool: ...
+    async def run_hook(self, fn, /, *args, **kwargs) -> Any: ...
+```
+
+The `Executor` controls how the agent loop performs I/O. One method per operation, so each can have its own execution strategy.
+
+The default `DirectExecutor` calls everything inline — zero overhead, identical to the behavior before the protocol existed. Pass `executor=` to `AgentLoop` or `Exoclaw` to swap it:
+
+```python
+from exoclaw import Exoclaw
+
+app = Exoclaw(
+    provider=provider,
+    conversation=conversation,
+    executor=my_custom_executor,  # opt-in
+)
+```
+
+This is how you run exoclaw in different execution environments (workflow engines, distributed task queues, etc.) without changing any other protocol, channel, tool, or provider implementation.
+
+**Plugin ideas:**
+- `exoclaw-executor-temporal` — run each operation as a Temporal activity with per-operation timeouts and retry policies
+- `exoclaw-executor-celery` — route tool execution through Celery workers
 
 ---
 
@@ -416,6 +450,7 @@ The loop collects `system_context()` from all registered tools before each `buil
 ```
 exoclaw/
   app.py                   # Exoclaw — the composition root
+  executor.py              # Executor protocol + DirectExecutor
   agent/
     loop.py                # AgentLoop — the core processing engine
     conversation.py        # Conversation protocol

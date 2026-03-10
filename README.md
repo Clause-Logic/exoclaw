@@ -45,6 +45,15 @@ InboundMessage → Bus → AgentLoop → LLM → Tools → Bus → OutboundMessa
 
 Every one of those nouns is a protocol. Swap any of them out. No inheritance required.
 
+| Protocol | You implement | Default provided | Notes |
+|---|---|---|---|
+| `LLMProvider` | **yes** | — | Use a plugin like `exoclaw-provider-litellm` |
+| `Conversation` | **yes** | — | Use a plugin like `exoclaw-conversation` |
+| `Tool` | optional | — | Pass tools you need, or none |
+| `Channel` | optional | — | Pass channels you need, or use `process_direct()` |
+| `Bus` | optional | `MessageBus` | Asyncio queues, sufficient for single-process |
+| `Executor` | optional | `DirectExecutor` | Inline execution, zero overhead |
+
 ---
 
 ## The Protocols

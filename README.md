@@ -1,5 +1,9 @@
 # exoclaw 🦀
 
+[![PyPI](https://img.shields.io/pypi/v/exoclaw)](https://pypi.org/project/exoclaw/)
+[![CI](https://github.com/Clause-Logic/exoclaw/actions/workflows/pr.yml/badge.svg)](https://github.com/Clause-Logic/exoclaw/actions/workflows/pr.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **AI agent infrastructure that fits in your stack, not the other way around.**
 
 You have an app. Wire in exoclaw and it becomes intelligent — tool use, session memory, multi-turn conversations, any LLM. You own every piece. Nothing is baked in.

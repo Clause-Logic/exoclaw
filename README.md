@@ -357,6 +357,46 @@ The agent loop runs as a background task. Your API routes are just producers and
 
 ---
 
+### Durable execution with Temporal
+
+exoclaw's `Executor` protocol is the hook that enables running agents on [Temporal](https://temporal.io) without changing any tool, channel, or provider.
+
+[exoclaw-temporal](https://github.com/Clause-Logic/exoclaw-temporal) implements `AgentTurnWorkflow` — the agent loop rewritten as a Temporal workflow where each operation is a Temporal activity:
+
+| Executor method | Temporal activity | What it means |
+|---|---|---|
+| `build_prompt` | `build_prompt_activity` | Load history from shared volume |
+| `chat` | `llm_chat_activity` | LLM call with retry on transient failure |
+| `execute_tool` | `execute_tool_activity` | Tool call with heartbeat — survives worker death |
+| `record` | `record_turn_activity` | Persist new messages to shared volume |
+
+The result: every tool call, every LLM call, every retry is checkpointed. If a worker pod dies mid-execution, Temporal reschedules on a survivor. The agent resumes exactly where it left off — not from the start of the turn, but from the exact activity that was interrupted.
+
+```python
+from exoclaw_temporal.config import LLMConfig, TurnInput, WorkspaceConfig
+from exoclaw_temporal.turn_based.workflows.agent_turn import AgentTurnWorkflow
+from temporalio.client import Client
+
+client = await Client.connect("localhost:7233")
+result = await client.execute_workflow(
+    AgentTurnWorkflow.run,
+    TurnInput(
+        session_id="my-session",
+        message="Write a summary of this codebase.",
+        llm=LLMConfig(model="anthropic/claude-sonnet-4-6"),
+        workspace=WorkspaceConfig(path="/workspace"),
+        ...
+    ),
+    id="turn-1",
+    task_queue="exoclaw-temporal",
+)
+print(result.final_content)
+```
+
+See [exoclaw-temporal](https://github.com/Clause-Logic/exoclaw-temporal) for the full setup, Kubernetes deployment, bounce demo, and session-based approach (one long-running workflow per conversation).
+
+---
+
 ### Swap components without touching the loop
 
 ```python

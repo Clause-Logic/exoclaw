@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+
 from loguru import logger
 
 from exoclaw.bus.events import OutboundMessage
@@ -19,10 +20,11 @@ class ChannelManager:
     ChannelFactory.
     """
 
-    def __init__(self, channels: list[Channel], bus: Bus):
+    def __init__(self, channels: list[Channel], bus: Bus, filter_tool_hints: bool = False) -> None:
         self.bus = bus
         self.channels: dict[str, Channel] = {ch.name: ch for ch in channels}
         self._dispatch_task: asyncio.Task[None] | None = None
+        self._filter_tool_hints = filter_tool_hints
 
     def register(self, channel: Channel) -> None:
         """Register a channel after construction."""
@@ -42,8 +44,7 @@ class ChannelManager:
         self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
 
         tasks = [
-            asyncio.create_task(self._start_channel(name, ch))
-            for name, ch in self.channels.items()
+            asyncio.create_task(self._start_channel(name, ch)) for name, ch in self.channels.items()
         ]
         logger.info("Starting channels: {}", list(self.channels))
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -75,9 +76,8 @@ class ChannelManager:
                     timeout=1.0,
                 )
 
-                if msg.metadata.get("_progress"):
-                    # Progress filtering is a policy concern — handled by caller
-                    pass
+                if self._filter_tool_hints and msg.metadata and msg.metadata.get("_tool_hint"):
+                    continue
 
                 channel = self.channels.get(msg.channel)
                 if channel:
@@ -95,4 +95,3 @@ class ChannelManager:
 
     def get_channel(self, name: str) -> Channel | None:
         return self.channels.get(name)
-

@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from exoclaw.agent.tools.protocol import ToolContext
 from exoclaw.executor import DirectExecutor, Executor
 
 
 class TestDirectExecutorChat:
-    async def test_delegates_to_provider(self):
+    async def test_delegates_to_provider(self) -> None:
         executor = DirectExecutor()
         provider = MagicMock()
         expected = MagicMock()
@@ -39,7 +37,7 @@ class TestDirectExecutorChat:
 
 
 class TestDirectExecutorExecuteTool:
-    async def test_delegates_to_registry(self):
+    async def test_delegates_to_registry(self) -> None:
         executor = DirectExecutor()
         registry = MagicMock()
         registry.execute = AsyncMock(return_value="tool result")
@@ -50,7 +48,7 @@ class TestDirectExecutorExecuteTool:
         assert result == "tool result"
         registry.execute.assert_awaited_once_with("my_tool", {"x": 1}, ctx)
 
-    async def test_none_ctx(self):
+    async def test_none_ctx(self) -> None:
         executor = DirectExecutor()
         registry = MagicMock()
         registry.execute = AsyncMock(return_value="ok")
@@ -62,24 +60,33 @@ class TestDirectExecutorExecuteTool:
 
 
 class TestDirectExecutorBuildPrompt:
-    async def test_delegates_to_conversation(self):
+    async def test_delegates_to_conversation(self) -> None:
         executor = DirectExecutor()
         conversation = MagicMock()
         expected = [{"role": "system", "content": "hi"}]
         conversation.build_prompt = AsyncMock(return_value=expected)
 
         result = await executor.build_prompt(
-            conversation, "session:1", "hello", channel="cli", chat_id="1",
+            conversation,
+            "session:1",
+            "hello",
+            channel="cli",
+            chat_id="1",
         )
 
         assert result is expected
         conversation.build_prompt.assert_awaited_once_with(
-            "session:1", "hello", channel="cli", chat_id="1",
+            "session:1",
+            "hello",
+            channel="cli",
+            chat_id="1",
+            media=None,
+            plugin_context=None,
         )
 
 
 class TestDirectExecutorRecord:
-    async def test_delegates_to_conversation(self):
+    async def test_delegates_to_conversation(self) -> None:
         executor = DirectExecutor()
         conversation = MagicMock()
         conversation.record = AsyncMock()
@@ -91,7 +98,7 @@ class TestDirectExecutorRecord:
 
 
 class TestDirectExecutorClear:
-    async def test_delegates_to_conversation(self):
+    async def test_delegates_to_conversation(self) -> None:
         executor = DirectExecutor()
         conversation = MagicMock()
         conversation.clear = AsyncMock(return_value=True)
@@ -103,7 +110,7 @@ class TestDirectExecutorClear:
 
 
 class TestDirectExecutorRunHook:
-    async def test_calls_hook_function(self):
+    async def test_calls_hook_function(self) -> None:
         executor = DirectExecutor()
         hook = AsyncMock(return_value="extra context")
 
@@ -112,7 +119,7 @@ class TestDirectExecutorRunHook:
         assert result == "extra context"
         hook.assert_awaited_once_with("arg1", "arg2", kw="val")
 
-    async def test_returns_none_from_hook(self):
+    async def test_returns_none_from_hook(self) -> None:
         executor = DirectExecutor()
         hook = AsyncMock(return_value=None)
 
@@ -122,14 +129,14 @@ class TestDirectExecutorRunHook:
 
 
 class TestExecutorProtocol:
-    def test_direct_executor_satisfies_protocol(self):
+    def test_direct_executor_satisfies_protocol(self) -> None:
         assert isinstance(DirectExecutor(), Executor)
 
 
 class TestCustomExecutorInLoop:
     """Verify the loop routes I/O through a custom executor."""
 
-    async def test_chat_routed_through_executor(self):
+    async def test_chat_routed_through_executor(self) -> None:
         from exoclaw.agent.loop import AgentLoop
         from exoclaw.bus.queue import MessageBus
 
@@ -153,10 +160,14 @@ class TestCustomExecutorInLoop:
         executor.record = AsyncMock()
 
         loop = AgentLoop(
-            bus=bus, provider=provider, conversation=conversation, executor=executor,
+            bus=bus,
+            provider=provider,
+            conversation=conversation,
+            executor=executor,
         )
 
         from exoclaw.bus.events import InboundMessage
+
         msg = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="hi")
         result = await loop._process_message(msg)
 
@@ -166,7 +177,7 @@ class TestCustomExecutorInLoop:
         executor.chat.assert_awaited_once()
         provider.chat.assert_not_called()
 
-    async def test_clear_routed_through_executor(self):
+    async def test_clear_routed_through_executor(self) -> None:
         from exoclaw.agent.loop import AgentLoop
         from exoclaw.bus.events import InboundMessage
         from exoclaw.bus.queue import MessageBus
@@ -180,7 +191,10 @@ class TestCustomExecutorInLoop:
         executor.clear = AsyncMock(return_value=True)
 
         loop = AgentLoop(
-            bus=bus, provider=provider, conversation=conversation, executor=executor,
+            bus=bus,
+            provider=provider,
+            conversation=conversation,
+            executor=executor,
         )
 
         msg = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="/new")
@@ -191,7 +205,7 @@ class TestCustomExecutorInLoop:
         # conversation.clear should NOT be called directly
         conversation.clear.assert_not_called()
 
-    async def test_execute_tool_routed_through_executor(self):
+    async def test_execute_tool_routed_through_executor(self) -> None:
         from exoclaw.agent.loop import AgentLoop
         from exoclaw.bus.events import InboundMessage
         from exoclaw.bus.queue import MessageBus
@@ -229,7 +243,10 @@ class TestCustomExecutorInLoop:
         executor.execute_tool = AsyncMock(return_value="tool output")
 
         loop = AgentLoop(
-            bus=bus, provider=provider, conversation=conversation, executor=executor,
+            bus=bus,
+            provider=provider,
+            conversation=conversation,
+            executor=executor,
         )
         # Register a dummy tool so get_definitions returns something
         tool = MagicMock()

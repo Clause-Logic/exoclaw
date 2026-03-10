@@ -5,19 +5,17 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from exoclaw.app import Exoclaw as Nanobot
 from exoclaw.bus.queue import MessageBus
 
 
-def _make_provider():
+def _make_provider() -> MagicMock:
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
     return provider
 
 
-def _make_conversation():
+def _make_conversation() -> MagicMock:
     conv = MagicMock()
     conv.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
     conv.record = AsyncMock()
@@ -26,7 +24,7 @@ def _make_conversation():
 
 
 class TestNanobotBuild:
-    def test_build_with_explicit_bus(self):
+    def test_build_with_explicit_bus(self) -> None:
         bus = MessageBus()
         app = Nanobot(
             provider=_make_provider(),
@@ -36,7 +34,7 @@ class TestNanobotBuild:
         result_bus, agent, channel_manager = app._build()
         assert result_bus is bus
 
-    def test_build_without_bus_creates_message_bus(self):
+    def test_build_without_bus_creates_message_bus(self) -> None:
         app = Nanobot(
             provider=_make_provider(),
             conversation=_make_conversation(),
@@ -44,7 +42,7 @@ class TestNanobotBuild:
         bus, agent, channel_manager = app._build()
         assert isinstance(bus, MessageBus)
 
-    def test_build_returns_agent_with_correct_model(self):
+    def test_build_returns_agent_with_correct_model(self) -> None:
         provider = _make_provider()
         provider.get_default_model.return_value = "gpt-4"
         app = Nanobot(
@@ -54,7 +52,7 @@ class TestNanobotBuild:
         _, agent, _ = app._build()
         assert agent.model == "gpt-4"
 
-    def test_build_with_explicit_model(self):
+    def test_build_with_explicit_model(self) -> None:
         app = Nanobot(
             provider=_make_provider(),
             conversation=_make_conversation(),
@@ -63,7 +61,7 @@ class TestNanobotBuild:
         _, agent, _ = app._build()
         assert agent.model == "claude-3"
 
-    def test_build_with_channels(self):
+    def test_build_with_channels(self) -> None:
         ch = MagicMock()
         ch.name = "slack"
         app = Nanobot(
@@ -74,7 +72,7 @@ class TestNanobotBuild:
         _, _, channel_manager = app._build()
         assert channel_manager.get_channel("slack") is ch
 
-    def test_build_with_no_channels(self):
+    def test_build_with_no_channels(self) -> None:
         app = Nanobot(
             provider=_make_provider(),
             conversation=_make_conversation(),
@@ -82,7 +80,7 @@ class TestNanobotBuild:
         _, _, channel_manager = app._build()
         assert channel_manager.channels == {}
 
-    def test_build_passes_temperature_and_max_tokens(self):
+    def test_build_passes_temperature_and_max_tokens(self) -> None:
         app = Nanobot(
             provider=_make_provider(),
             conversation=_make_conversation(),
@@ -95,7 +93,7 @@ class TestNanobotBuild:
         assert agent.max_tokens == 2048
         assert agent.max_iterations == 10
 
-    def test_build_with_tools(self):
+    def test_build_with_tools(self) -> None:
         tool = MagicMock()
         tool.name = "my_tool"
         app = Nanobot(
@@ -108,7 +106,7 @@ class TestNanobotBuild:
 
 
 class TestNanobotRun:
-    async def test_run_calls_agent_run_and_start_all(self):
+    async def test_run_calls_agent_run_and_start_all(self) -> None:
         app = Nanobot(
             provider=_make_provider(),
             conversation=_make_conversation(),
@@ -117,11 +115,11 @@ class TestNanobotRun:
         agent_run_called = asyncio.Event()
         start_all_called = asyncio.Event()
 
-        async def fake_agent_run():
+        async def fake_agent_run() -> None:
             agent_run_called.set()
             await asyncio.sleep(10)  # will be cancelled
 
-        async def fake_start_all():
+        async def fake_start_all() -> None:
             start_all_called.set()
             await asyncio.sleep(10)  # will be cancelled
 
@@ -144,7 +142,7 @@ class TestNanobotRun:
         assert agent_run_called.is_set()
         assert start_all_called.is_set()
 
-    async def test_run_calls_stop_on_shutdown(self):
+    async def test_run_calls_stop_on_shutdown(self) -> None:
         app = Nanobot(
             provider=_make_provider(),
             conversation=_make_conversation(),
@@ -155,7 +153,8 @@ class TestNanobotRun:
         agent_stop_called = []
 
         original_stop = agent.stop
-        def fake_stop():
+
+        def fake_stop() -> None:
             agent_stop_called.append(True)
             original_stop()
 
@@ -170,7 +169,7 @@ class TestNanobotRun:
 
         assert len(agent_stop_called) == 1
 
-    async def test_run_calls_stop_all_on_shutdown(self):
+    async def test_run_calls_stop_all_on_shutdown(self) -> None:
         app = Nanobot(
             provider=_make_provider(),
             conversation=_make_conversation(),

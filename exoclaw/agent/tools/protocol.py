@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 
 @dataclass
@@ -13,11 +13,12 @@ class ToolContext:
 
     Duck-typed — tools that need session routing implement:
 
-        async def execute_with_context(self, ctx: ToolContext, **kwargs: Any) -> str:
+        async def execute_with_context(self, ctx: ToolContext, **kwargs: object) -> str:
             ...
 
     Tools that don't need it keep execute(**kwargs) and the registry handles both.
     """
+
     session_key: str
     channel: str
     chat_id: str
@@ -35,7 +36,7 @@ class Tool(Protocol):
             description = "Does something useful."
             parameters = {"type": "object", "properties": {...}, "required": [...]}
 
-            async def execute(self, **kwargs: Any) -> str:
+            async def execute(self, **kwargs: object) -> str:
                 ...
 
     Use ToolBase as an optional mixin to get
@@ -49,9 +50,9 @@ class Tool(Protocol):
     def description(self) -> str: ...
 
     @property
-    def parameters(self) -> dict[str, Any]: ...
+    def parameters(self) -> dict[str, object]: ...
 
-    async def execute(self, **kwargs: Any) -> str: ...
+    async def execute(self, **kwargs: object) -> str: ...
 
 
 class ToolBase:
@@ -72,35 +73,50 @@ class ToolBase:
         "object": dict,
     }
 
-    def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
+    def cast_params(self, params: dict[str, object]) -> dict[str, object]:
         """Apply safe schema-driven casts before validation."""
         schema = self.parameters or {}  # type: ignore[attr-defined]
         if schema.get("type", "object") != "object":
             return params
         return self._cast_object(params, schema)
 
-    def _cast_object(self, obj: Any, schema: dict[str, Any]) -> dict[str, Any]:
+    def _cast_object(self, obj: object, schema: dict[str, object]) -> dict[str, object]:
         """Cast an object (dict) according to schema."""
         if not isinstance(obj, dict):
-            return obj  # type: ignore[no-any-return]
+            return cast(dict[str, object], obj)
+        obj_dict = cast(dict[str, object], obj)
         props = schema.get("properties", {})
-        result = {}
-        for key, value in obj.items():
-            if key in props:
-                result[key] = self._cast_value(value, props[key])
+        result: dict[str, object] = {}
+        if not isinstance(props, dict):
+            return dict(obj_dict)
+        props_dict = cast(dict[str, object], props)
+        for key, value in obj_dict.items():
+            if key in props_dict:
+                prop_schema = props_dict[key]
+                if isinstance(prop_schema, dict):
+                    result[key] = self._cast_value(value, cast(dict[str, object], prop_schema))
+                else:
+                    result[key] = value
             else:
                 result[key] = value
         return result
 
-    def _cast_value(self, val: Any, schema: dict[str, Any]) -> Any:
+    def _cast_value(self, val: object, schema: dict[str, object]) -> object:
         """Cast a single value according to schema."""
         target_type = schema.get("type")
+        if not isinstance(target_type, str):
+            return val
 
         if target_type == "boolean" and isinstance(val, bool):
             return val
         if target_type == "integer" and isinstance(val, int) and not isinstance(val, bool):
             return val
-        if target_type in self._TYPE_MAP and target_type not in ("boolean", "integer", "array", "object"):
+        if target_type in self._TYPE_MAP and target_type not in (
+            "boolean",
+            "integer",
+            "array",
+            "object",
+        ):
             expected = self._TYPE_MAP[target_type]
             if isinstance(val, expected):
                 return val
@@ -130,14 +146,18 @@ class ToolBase:
 
         if target_type == "array" and isinstance(val, list):
             item_schema = schema.get("items")
-            return [self._cast_value(item, item_schema) for item in val] if item_schema else val
+            if isinstance(item_schema, dict):
+                return [
+                    self._cast_value(item, cast(dict[str, object], item_schema)) for item in val
+                ]
+            return val
 
         if target_type == "object" and isinstance(val, dict):
             return self._cast_object(val, schema)
 
         return val
 
-    def validate_params(self, params: dict[str, Any]) -> list[str]:
+    def validate_params(self, params: dict[str, object]) -> list[str]:
         """Validate tool parameters against JSON schema. Returns error list (empty if valid)."""
         if not isinstance(params, dict):
             return [f"parameters must be an object, got {type(params).__name__}"]
@@ -146,46 +166,75 @@ class ToolBase:
             raise ValueError(f"Schema must be object type, got {schema.get('type')!r}")
         return self._validate(params, {**schema, "type": "object"}, "")
 
-    def _validate(self, val: Any, schema: dict[str, Any], path: str) -> list[str]:
+    def _validate(self, val: object, schema: dict[str, object], path: str) -> list[str]:
         t, label = schema.get("type"), path or "parameter"
+        if not isinstance(t, str):
+            t = None
         if t == "integer" and (not isinstance(val, int) or isinstance(val, bool)):
             return [f"{label} should be integer"]
-        if t == "number" and (
-            not isinstance(val, self._TYPE_MAP[t]) or isinstance(val, bool)
-        ):
+        if t == "number" and (not isinstance(val, self._TYPE_MAP[t]) or isinstance(val, bool)):
             return [f"{label} should be number"]
-        if t in self._TYPE_MAP and t not in ("integer", "number") and not isinstance(val, self._TYPE_MAP[t]):
+        if (
+            t in self._TYPE_MAP
+            and t not in ("integer", "number")
+            and not isinstance(val, self._TYPE_MAP[t])
+        ):
             return [f"{label} should be {t}"]
 
         errors = []
-        if "enum" in schema and val not in schema["enum"]:
-            errors.append(f"{label} must be one of {schema['enum']}")
-        if t in ("integer", "number"):
-            if "minimum" in schema and val < schema["minimum"]:
-                errors.append(f"{label} must be >= {schema['minimum']}")
-            if "maximum" in schema and val > schema["maximum"]:
-                errors.append(f"{label} must be <= {schema['maximum']}")
-        if t == "string":
-            if "minLength" in schema and len(val) < schema["minLength"]:
-                errors.append(f"{label} must be at least {schema['minLength']} chars")
-            if "maxLength" in schema and len(val) > schema["maxLength"]:
-                errors.append(f"{label} must be at most {schema['maxLength']} chars")
-        if t == "object":
+        enum = schema.get("enum")
+        if enum is not None and isinstance(enum, list) and val not in enum:
+            errors.append(f"{label} must be one of {enum}")
+        if t in ("integer", "number") and isinstance(val, (int, float)):
+            minimum = schema.get("minimum")
+            maximum = schema.get("maximum")
+            if minimum is not None and val < minimum:  # type: ignore[operator]
+                errors.append(f"{label} must be >= {minimum}")
+            if maximum is not None and val > maximum:  # type: ignore[operator]
+                errors.append(f"{label} must be <= {maximum}")
+        if t == "string" and isinstance(val, str):
+            min_length = schema.get("minLength")
+            max_length = schema.get("maxLength")
+            if min_length is not None and isinstance(min_length, int) and len(val) < min_length:
+                errors.append(f"{label} must be at least {min_length} chars")
+            if max_length is not None and isinstance(max_length, int) and len(val) > max_length:
+                errors.append(f"{label} must be at most {max_length} chars")
+        if t == "object" and isinstance(val, dict):
+            val_dict = cast(dict[str, object], val)
             props = schema.get("properties", {})
-            for k in schema.get("required", []):
-                if k not in val:
-                    errors.append(f"missing required {path + '.' + k if path else k}")
-            for k, v in val.items():
-                if k in props:
-                    errors.extend(self._validate(v, props[k], path + "." + k if path else k))
-        if t == "array" and "items" in schema:
-            for i, item in enumerate(val):
-                errors.extend(
-                    self._validate(item, schema["items"], f"{path}[{i}]" if path else f"[{i}]")
-                )
+            required = schema.get("required", [])
+            if isinstance(required, list):
+                required_list = cast(list[str], required)
+                for k in required_list:
+                    if k not in val_dict:
+                        errors.append(f"missing required {path + '.' + k if path else k}")
+            if isinstance(props, dict):
+                props_dict = cast(dict[str, object], props)
+                for k, v in val_dict.items():
+                    if k in props_dict:
+                        prop_schema = props_dict[k]
+                        if isinstance(prop_schema, dict):
+                            errors.extend(
+                                self._validate(
+                                    v,
+                                    cast(dict[str, object], prop_schema),
+                                    path + "." + k if path else k,
+                                )
+                            )
+        if t == "array" and "items" in schema and isinstance(val, list):
+            item_schema = schema["items"]
+            if isinstance(item_schema, dict):
+                for i, item in enumerate(val):
+                    errors.extend(
+                        self._validate(
+                            item,
+                            cast(dict[str, object], item_schema),
+                            f"{path}[{i}]" if path else f"[{i}]",
+                        )
+                    )
         return errors
 
-    def to_schema(self) -> dict[str, Any]:
+    def to_schema(self) -> dict[str, object]:
         """Convert tool to OpenAI function schema format."""
         return {
             "type": "function",

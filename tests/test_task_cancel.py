@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+if TYPE_CHECKING:
+    from exoclaw.agent.loop import AgentLoop
+    from exoclaw.bus.queue import MessageBus
 
-def _make_loop():
+
+def _make_loop() -> tuple["AgentLoop", "MessageBus"]:
     """Create a minimal AgentLoop with mocked dependencies."""
     from exoclaw.agent.loop import AgentLoop
     from exoclaw.bus.queue import MessageBus
@@ -23,7 +28,7 @@ def _make_loop():
 
 class TestHandleStop:
     @pytest.mark.asyncio
-    async def test_stop_no_active_task(self):
+    async def test_stop_no_active_task(self) -> None:
         from exoclaw.bus.events import InboundMessage
 
         loop, bus = _make_loop()
@@ -33,13 +38,13 @@ class TestHandleStop:
         assert "No active task" in out.content
 
     @pytest.mark.asyncio
-    async def test_stop_cancels_active_task(self):
+    async def test_stop_cancels_active_task(self) -> None:
         from exoclaw.bus.events import InboundMessage
 
         loop, bus = _make_loop()
         cancelled = asyncio.Event()
 
-        async def slow_task():
+        async def slow_task() -> None:
             try:
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
@@ -58,13 +63,13 @@ class TestHandleStop:
         assert "stopped" in out.content.lower()
 
     @pytest.mark.asyncio
-    async def test_stop_cancels_multiple_tasks(self):
+    async def test_stop_cancels_multiple_tasks(self) -> None:
         from exoclaw.bus.events import InboundMessage
 
         loop, bus = _make_loop()
         events = [asyncio.Event(), asyncio.Event()]
 
-        async def slow(idx):
+        async def slow(idx: int) -> None:
             try:
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
@@ -85,7 +90,7 @@ class TestHandleStop:
 
 class TestDispatch:
     @pytest.mark.asyncio
-    async def test_dispatch_processes_and_publishes(self):
+    async def test_dispatch_processes_and_publishes(self) -> None:
         from exoclaw.bus.events import InboundMessage, OutboundMessage
 
         loop, bus = _make_loop()
@@ -98,17 +103,17 @@ class TestDispatch:
         assert out.content == "hi"
 
     @pytest.mark.asyncio
-    async def test_processing_lock_serializes(self):
+    async def test_processing_lock_serializes(self) -> None:
         from exoclaw.bus.events import InboundMessage, OutboundMessage
 
         loop, bus = _make_loop()
         order = []
 
-        async def mock_process(m, **kwargs):
-            order.append(f"start-{m.content}")
+        async def mock_process(m: object, **kwargs: object) -> OutboundMessage:
+            order.append(f"start-{m.content}")  # type: ignore[union-attr]
             await asyncio.sleep(0.05)
-            order.append(f"end-{m.content}")
-            return OutboundMessage(channel="test", chat_id="c1", content=m.content)
+            order.append(f"end-{m.content}")  # type: ignore[union-attr]
+            return OutboundMessage(channel="test", chat_id="c1", content=m.content)  # type: ignore[union-attr]
 
         loop._process_message = mock_process
         msg1 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="a")
@@ -122,7 +127,7 @@ class TestDispatch:
 
 class TestRunCancellation:
     @pytest.mark.asyncio
-    async def test_run_cancels_cleanly_with_active_dispatch(self):
+    async def test_run_cancels_cleanly_with_active_dispatch(self) -> None:
         """When run() is cancelled, it must also cancel any in-flight _dispatch() child tasks."""
         from exoclaw.agent.loop import AgentLoop
         from exoclaw.bus.events import InboundMessage
@@ -136,7 +141,7 @@ class TestRunCancellation:
         dispatch_started = asyncio.Event()
         dispatch_cancelled = asyncio.Event()
 
-        async def slow_dispatch(msg):
+        async def slow_dispatch(msg: object) -> None:
             dispatch_started.set()
             try:
                 await asyncio.sleep(60)  # simulates a hung LLM call
@@ -149,9 +154,9 @@ class TestRunCancellation:
         run_task = asyncio.create_task(loop.run())
 
         # Publish a message so _dispatch starts
-        await bus.publish_inbound(InboundMessage(
-            channel="test", sender_id="u1", chat_id="c1", content="hello"
-        ))
+        await bus.publish_inbound(
+            InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="hello")
+        )
         await asyncio.wait_for(dispatch_started.wait(), timeout=2.0)
 
         # Cancel run() — the child dispatch task must also be cancelled

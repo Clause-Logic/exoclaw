@@ -1,6 +1,6 @@
 """LLMProvider protocol — the only provider surface core depends on."""
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from exoclaw.providers.types import LLMResponse
 
@@ -9,8 +9,8 @@ from exoclaw.providers.types import LLMResponse
 class LLMProvider(Protocol):
     async def chat(
         self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,

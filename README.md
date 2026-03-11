@@ -524,6 +524,29 @@ exoclaw/
 
 ---
 
+## Unexpected stacks you can turn into agents
+
+exoclaw is protocols and a loop. If it can send a message, it's a Channel. If it can run code, it's a Tool. Here are some stacks nobody expects to be "agent-ready" — until you wire in exo.
+
+| Stack | Channel | Tools | Why it's fun |
+|---|---|---|---|
+| **Google Sheets** | Apps Script `onEdit` trigger → webhook channel | Read/write cells, run formulas, create charts | A spreadsheet that answers back. Type a question in A1, get the answer in B1. |
+| **Arduino / Raspberry Pi** | Serial or GPIO input → custom channel | Sensor reads, motor/servo control, LED output | Physical-world agent. Ask it the temperature, it reads the DHT22. Tell it to wave, it moves a servo. |
+| **Minecraft** | In-game chat via RCON → channel | Block placement, crafting, inventory, pathfinding | A Minecraft bot that builds what you describe in chat. |
+| **Twitch chat** | IRC/WebSocket channel | Stream alerts, clip creation, poll management | Your live stream gets a co-host that reacts to chat in real time. |
+| **Email (IMAP/SMTP)** | IMAP idle → channel, SMTP → send | File attachments, calendar invites, contact lookup | Your inbox becomes an agent. Forward it a PDF, it summarizes and replies. |
+| **iOS Shortcuts** | HTTP request shortcut → webhook channel | Shortcuts actions (calendar, reminders, clipboard) | "Hey Siri, ask exo to plan my week" — and it actually does. |
+| **Home Assistant** | HA webhook/event bus → channel | Entity control (lights, locks, thermostat, cameras) | Your smart home becomes agentic. "Make it cozy" dims the lights and sets the thermostat. |
+| **Vim / Neovim** | Neovim RPC (`nvim --listen`) → channel | Buffer read/write, LSP actions, terminal commands | Your text editor grows a brain. Highlight code, ask a question, get the answer in a split. |
+| **MIDI controller** | MIDI input messages → channel | DAW control, note generation, sample triggering | Tap a pad, describe a vibe, get a generated MIDI pattern routed back to your DAW. |
+| **Old-school IRC** | IRC protocol → channel | Channel ops, NickServ, topic management | 1999 vibes with 2026 intelligence. The IRC bot that actually understands context. |
+| **Cron + shell scripts** | Cron fires a message → heartbeat channel | Shell tool, file tools, curl | Zero-UI agent. A crontab entry and a shell script — that's the whole stack. It just does things on a schedule. |
+| **Printer (network)** | IPP/CUPS watch → channel | Print jobs, scan-to-text (OCR tool) | Print a question on paper, feed it to the scanner. The agent prints the answer back. The most cursed chat interface ever built. |
+
+Every one of these is the same pattern: implement `start()`, `stop()`, and `send()` for a Channel, write a few Tools, and the agent loop handles the rest. The LLM doesn't know or care whether it's talking to Slack or a servo motor.
+
+---
+
 ## License
 
 MIT

@@ -53,6 +53,10 @@ class AgentLoop:
         on_post_turn: Callable[[list[dict[str, object]], str, str, str], Awaitable[None]]
         | None = None,
         on_max_iterations: Callable[[str, str, str], Awaitable[None]] | None = None,
+        # Called with all tool calls before execution begins (structured, for UI/observability).
+        on_tool_calls: Callable[["list[ToolCallRequest]"], Awaitable[None]] | None = None,
+        # Called after each tool result (tool_call, result) — for streaming previews.
+        on_tool_result: Callable[["ToolCallRequest", str], Awaitable[None]] | None = None,
         executor: Executor | None = None,
     ) -> None:
         self.bus = bus
@@ -68,6 +72,8 @@ class AgentLoop:
         self._on_pre_tool = on_pre_tool
         self._on_post_turn = on_post_turn
         self._on_max_iterations = on_max_iterations
+        self._on_tool_calls = on_tool_calls
+        self._on_tool_result = on_tool_result
 
         self.conversation = conversation
 
@@ -152,6 +158,8 @@ class AgentLoop:
                     if thought:
                         await on_progress(thought)
                     await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
+                if self._on_tool_calls:
+                    await self._executor.run_hook(self._on_tool_calls, response.tool_calls)
 
                 tool_call_dicts = [
                     {
@@ -189,12 +197,22 @@ class AgentLoop:
                             result = str(rejection)
                         else:
                             result = await self._executor.execute_tool(
-                                self.tools, tool_call.name, tool_call.arguments, self._current_ctx
+                                self.tools,
+                                tool_call.name,
+                                tool_call.arguments,
+                                self._current_ctx,
+                                tool_call_id=tool_call.id,
                             )
                     else:
                         result = await self._executor.execute_tool(
-                            self.tools, tool_call.name, tool_call.arguments, self._current_ctx
+                            self.tools,
+                            tool_call.name,
+                            tool_call.arguments,
+                            self._current_ctx,
+                            tool_call_id=tool_call.id,
                         )
+                    if self._on_tool_result:
+                        await self._executor.run_hook(self._on_tool_result, tool_call, result)
                     messages = [
                         *messages,
                         {

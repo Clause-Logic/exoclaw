@@ -197,12 +197,18 @@ class AgentLoop:
                             result = str(rejection)
                         else:
                             result = await self._executor.execute_tool(
-                                self.tools, tool_call.name, tool_call.arguments, self._current_ctx,
+                                self.tools,
+                                tool_call.name,
+                                tool_call.arguments,
+                                self._current_ctx,
                                 tool_call_id=tool_call.id,
                             )
                     else:
                         result = await self._executor.execute_tool(
-                            self.tools, tool_call.name, tool_call.arguments, self._current_ctx,
+                            self.tools,
+                            tool_call.name,
+                            tool_call.arguments,
+                            self._current_ctx,
                             tool_call_id=tool_call.id,
                         )
                     if self._on_tool_result:

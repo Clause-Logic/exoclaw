@@ -39,6 +39,8 @@ class Executor(Protocol):
         name: str,
         params: dict[str, object],
         ctx: ToolContext | None = None,
+        *,
+        tool_call_id: str | None = None,
     ) -> str: ...
 
     async def build_prompt(
@@ -104,6 +106,8 @@ class DirectExecutor:
         name: str,
         params: dict[str, object],
         ctx: ToolContext | None = None,
+        *,
+        tool_call_id: str | None = None,
     ) -> str:
         return await registry.execute(name, params, ctx)
 

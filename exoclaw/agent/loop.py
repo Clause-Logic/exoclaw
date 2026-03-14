@@ -82,6 +82,8 @@ class AgentLoop:
             self.tools.register(tool)
             if hasattr(tool, "set_bus"):
                 tool.set_bus(self.bus)  # type: ignore[call-non-callable]
+            if hasattr(tool, "set_registry"):
+                tool.set_registry(self.tools)  # type: ignore[call-non-callable]
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task[None]]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()

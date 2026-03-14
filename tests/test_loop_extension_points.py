@@ -139,6 +139,27 @@ class TestSetBus:
 
 
 # ---------------------------------------------------------------------------
+# set_registry — duck-typed hook called at registration
+# ---------------------------------------------------------------------------
+
+
+class TestSetRegistry:
+    def test_set_registry_called_on_tool_registration(self) -> None:
+        tool = MagicMock()
+        tool.name = "registry_tool"
+        tool.set_registry = MagicMock()
+
+        loop, _ = _make_loop(tools=[tool])
+        tool.set_registry.assert_called_once_with(loop.tools)
+
+    def test_tools_without_set_registry_are_unaffected(self) -> None:
+        tool = MagicMock(spec=["name", "description", "parameters", "execute"])
+        tool.name = "plain_tool"
+        # Should not raise even though set_registry is not implemented
+        loop, _ = _make_loop(tools=[tool])
+
+
+# ---------------------------------------------------------------------------
 # Injectable registry
 # ---------------------------------------------------------------------------
 

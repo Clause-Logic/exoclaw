@@ -1,6 +1,23 @@
 """LLM provider abstraction module."""
 
 from exoclaw.providers.protocol import LLMProvider
-from exoclaw.providers.types import LLMResponse, ToolCallRequest
+from exoclaw.providers.types import (
+    JSONSchema,
+    LLMResponse,
+    ResponseFormat,
+    ResponseFormatJSONObject,
+    ResponseFormatJSONSchema,
+    ResponseFormatText,
+    ToolCallRequest,
+)
 
-__all__ = ["LLMProvider", "LLMResponse", "ToolCallRequest"]
+__all__ = [
+    "JSONSchema",
+    "LLMProvider",
+    "LLMResponse",
+    "ResponseFormat",
+    "ResponseFormatJSONObject",
+    "ResponseFormatJSONSchema",
+    "ResponseFormatText",
+    "ToolCallRequest",
+]

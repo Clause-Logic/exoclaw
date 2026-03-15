@@ -2,7 +2,7 @@
 
 from typing import Protocol, runtime_checkable
 
-from exoclaw.providers.types import LLMResponse
+from exoclaw.providers.types import LLMResponse, ResponseFormat
 
 
 @runtime_checkable
@@ -15,6 +15,7 @@ class LLMProvider(Protocol):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        response_format: ResponseFormat | None = None,
     ) -> LLMResponse: ...
 
     def get_default_model(self) -> str: ...

@@ -45,9 +45,7 @@ class ToolRegistry:
         """Check if a tool is registered."""
         return name in self._tools
 
-    def get_definitions(
-        self, include: "set[str] | None" = None
-    ) -> list[dict[str, object]]:
+    def get_definitions(self, include: "set[str] | None" = None) -> list[dict[str, object]]:
         """Get tool definitions in OpenAI format.
 
         Args:

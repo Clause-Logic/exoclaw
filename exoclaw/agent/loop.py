@@ -144,10 +144,15 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
+            _include = (
+                self.conversation.active_tools()
+                if hasattr(self.conversation, "active_tools")
+                else None
+            )
             response = await self._executor.chat(
                 self.provider,
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=self.tools.get_definitions(include=_include),
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,

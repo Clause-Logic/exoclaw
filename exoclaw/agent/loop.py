@@ -8,7 +8,8 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import cast
 
-from loguru import logger
+import structlog
+from structlog.typing import FilteringBoundLogger
 
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import Tool, ToolContext
@@ -58,6 +59,7 @@ class AgentLoop:
         # Called after each tool result (tool_call, result) — for streaming previews.
         on_tool_result: Callable[["ToolCallRequest", str], Awaitable[None]] | None = None,
         executor: Executor | None = None,
+        logger: FilteringBoundLogger | None = None,
     ) -> None:
         self.bus = bus
         self._executor: Executor = executor or DirectExecutor()
@@ -84,6 +86,7 @@ class AgentLoop:
                 tool.set_bus(self.bus)  # type: ignore[call-non-callable]
             if hasattr(tool, "set_registry"):
                 tool.set_registry(self.tools)  # type: ignore[call-non-callable]
+        self._log: FilteringBoundLogger = logger or structlog.get_logger()
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task[None]]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
@@ -105,9 +108,7 @@ class AgentLoop:
                     if result and isinstance(result, str):
                         ctx.append(result)
                 except Exception:
-                    logger.exception(
-                        "Error collecting system_context from tool {}", getattr(tool, "name", "?")
-                    )
+                    self._log.exception("system_context_error", tool=getattr(tool, "name", "?"))
         return ctx
 
     @staticmethod
@@ -191,15 +192,15 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+                    self._log.info("tool_called", tool=tool_call.name, args=args_str[:200])
                     if self._on_pre_tool:
                         sk = self._current_ctx.session_key if self._current_ctx else ""
                         rejection = await self._executor.run_hook(
                             self._on_pre_tool, tool_call.name, tool_call.arguments, sk
                         )
                         if rejection:
-                            logger.info(
-                                "on_pre_tool rejected {}: {}", tool_call.name, str(rejection)[:100]
+                            self._log.info(
+                                "tool_rejected", tool=tool_call.name, reason=str(rejection)[:100]
                             )
                             result = str(rejection)
                         else:
@@ -232,7 +233,7 @@ class AgentLoop:
             else:
                 clean = self._strip_think(response.content)
                 if response.finish_reason == "error":
-                    logger.error("LLM returned error: {}", (clean or "")[:200])
+                    self._log.error("llm_error", content=(clean or "")[:200])
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
                 msg2: dict[str, object] = {"role": "assistant", "content": clean}
@@ -245,7 +246,7 @@ class AgentLoop:
                 break
 
         if final_content is None and iteration >= self.max_iterations:
-            logger.warning("Max iterations ({}) reached", self.max_iterations)
+            self._log.warning("max_iterations_reached", max_iterations=self.max_iterations)
             final_content = (
                 f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
                 "without completing the task. You can try breaking the task into smaller steps."
@@ -261,7 +262,7 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
-        logger.info("Agent loop started")
+        self._log.info("agent_loop_started")
 
         try:
             while self._running:
@@ -288,7 +289,7 @@ class AgentLoop:
                 t.cancel()
             if all_tasks:
                 await asyncio.gather(*all_tasks, return_exceptions=True)
-            logger.info("Agent loop stopped")
+            self._log.info("agent_loop_stopped")
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""
@@ -330,10 +331,10 @@ class AgentLoop:
                         )
                     )
             except asyncio.CancelledError:
-                logger.info("Task cancelled for session {}", msg.session_key)
+                self._log.info("task_cancelled", session_key=msg.session_key)
                 raise
             except Exception:
-                logger.exception("Error processing message for session {}", msg.session_key)
+                self._log.exception("message_error", session_key=msg.session_key)
                 await self.bus.publish_outbound(
                     OutboundMessage(
                         channel=msg.channel,
@@ -345,7 +346,7 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
-        logger.info("Agent loop stopping")
+        self._log.info("agent_loop_stopping")
 
     async def _process_message(
         self,
@@ -359,7 +360,7 @@ class AgentLoop:
             channel, chat_id = (
                 msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
             )
-            logger.info("Processing system message from {}", msg.sender_id)
+            self._log.info("system_message_received", sender_id=msg.sender_id)
             sid = f"{channel}:{chat_id}"
             plugin_ctx = self._collect_plugin_context()
             initial = await self._executor.build_prompt(
@@ -379,7 +380,9 @@ class AgentLoop:
             )
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
-        logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+        self._log.info(
+            "message_received", channel=msg.channel, sender_id=msg.sender_id, preview=preview
+        )
 
         sid = session_key or msg.session_key
 
@@ -460,7 +463,9 @@ class AgentLoop:
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-        logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        self._log.info(
+            "response_sent", channel=msg.channel, sender_id=msg.sender_id, preview=preview
+        )
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,

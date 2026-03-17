@@ -19,7 +19,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from loguru import logger
+import structlog
+from structlog.typing import FilteringBoundLogger
 
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import Tool
@@ -52,6 +53,7 @@ class Exoclaw:
         max_iterations: int = 40,
         reasoning_effort: str | None = None,
         executor: Executor | None = None,
+        logger: FilteringBoundLogger | None = None,
     ) -> None:
         self.provider = provider
         self.executor = executor
@@ -64,6 +66,7 @@ class Exoclaw:
         self.max_tokens = max_tokens
         self.max_iterations = max_iterations
         self.reasoning_effort = reasoning_effort
+        self._log: FilteringBoundLogger = logger or structlog.get_logger()
 
     def _build(self) -> tuple[Bus, AgentLoop, ChannelManager]:
         """Instantiate all internal components. Called once at run time."""
@@ -89,9 +92,10 @@ class Exoclaw:
             reasoning_effort=self.reasoning_effort,
             tools=self.tools,
             executor=self.executor,
+            logger=self._log,
         )
 
-        channel_manager = ChannelManager(self.channels, bus)
+        channel_manager = ChannelManager(self.channels, bus, logger=self._log)
 
         return bus, agent, channel_manager
 
@@ -99,7 +103,7 @@ class Exoclaw:
         """Start all components and run until interrupted."""
         bus, agent, channel_manager = self._build()
 
-        logger.info("Exoclaw starting")
+        self._log.info("exoclaw_starting")
 
         try:
             await asyncio.gather(
@@ -107,7 +111,7 @@ class Exoclaw:
                 channel_manager.start_all(),
             )
         except (KeyboardInterrupt, asyncio.CancelledError):
-            logger.info("Shutting down...")
+            self._log.info("exoclaw_stopping")
         finally:
             agent.stop()
             await channel_manager.stop_all()

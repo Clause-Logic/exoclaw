@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from loguru import logger
+import structlog
+from structlog.typing import FilteringBoundLogger
 
 from exoclaw.bus.events import OutboundMessage
 from exoclaw.bus.protocol import Bus
@@ -20,11 +21,18 @@ class ChannelManager:
     ChannelFactory.
     """
 
-    def __init__(self, channels: list[Channel], bus: Bus, filter_tool_hints: bool = False) -> None:
+    def __init__(
+        self,
+        channels: list[Channel],
+        bus: Bus,
+        filter_tool_hints: bool = False,
+        logger: FilteringBoundLogger | None = None,
+    ) -> None:
         self.bus = bus
         self.channels: dict[str, Channel] = {ch.name: ch for ch in channels}
         self._dispatch_task: asyncio.Task[None] | None = None
         self._filter_tool_hints = filter_tool_hints
+        self._log: FilteringBoundLogger = logger or structlog.get_logger()
 
     def register(self, channel: Channel) -> None:
         """Register a channel after construction."""
@@ -34,11 +42,11 @@ class ChannelManager:
         try:
             await channel.start(self.bus)
         except Exception as e:
-            logger.error("Failed to start channel {}: {}", name, e)
+            self._log.error("channel_start_failed", channel=name, error=str(e))
 
     async def start_all(self) -> None:
         if not self.channels:
-            logger.warning("No channels enabled")
+            self._log.warning("no_channels_enabled")
             return
 
         self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
@@ -46,11 +54,11 @@ class ChannelManager:
         tasks = [
             asyncio.create_task(self._start_channel(name, ch)) for name, ch in self.channels.items()
         ]
-        logger.info("Starting channels: {}", list(self.channels))
+        self._log.info("channels_starting", channels=list(self.channels))
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def stop_all(self) -> None:
-        logger.info("Stopping all channels...")
+        self._log.info("channels_stopping")
 
         if self._dispatch_task:
             self._dispatch_task.cancel()
@@ -62,12 +70,12 @@ class ChannelManager:
         for name, channel in self.channels.items():
             try:
                 await channel.stop()
-                logger.info("Stopped {} channel", name)
+                self._log.info("channel_stopped", channel=name)
             except Exception as e:
-                logger.error("Error stopping {}: {}", name, e)
+                self._log.error("channel_stop_failed", channel=name, error=str(e))
 
     async def _dispatch_outbound(self) -> None:
-        logger.info("Outbound dispatcher started")
+        self._log.info("outbound_dispatcher_started")
 
         while True:
             try:
@@ -84,9 +92,9 @@ class ChannelManager:
                     try:
                         await channel.send(msg)
                     except Exception as e:
-                        logger.error("Error sending to {}: {}", msg.channel, e)
+                        self._log.error("outbound_send_failed", channel=msg.channel, error=str(e))
                 else:
-                    logger.warning("Unknown channel: {}", msg.channel)
+                    self._log.warning("unknown_channel", channel=msg.channel)
 
             except asyncio.TimeoutError:
                 continue

@@ -12,7 +12,7 @@ You have an app. Wire in exoclaw and it becomes intelligent — tool use, sessio
 pip install exoclaw
 ```
 
-One runtime dependency: `loguru`.
+One runtime dependency: `structlog`.
 
 ---
 

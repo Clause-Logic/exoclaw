@@ -62,6 +62,7 @@ class ToolBase:
     Provides cast_params, validate_params, and to_schema so you don't have
     to write them yourself. Inherit from ToolBase to get them for free, or
     skip it and just satisfy the Tool protocol directly.
+
     """
 
     _TYPE_MAP: dict[str, type | tuple[type, ...]] = {

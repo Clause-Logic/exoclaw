@@ -47,3 +47,13 @@ class Conversation(Protocol):
     def list_sessions(self) -> list[dict[str, Any]]:
         """Return metadata for all known sessions."""
         ...
+
+    def active_tools(self) -> set[str]:
+        """Return the set of optional tool names to surface for the current turn.
+
+        Optional hook — implementations that don't need skill-scoped tool
+        activation can omit this method.  The agent loop calls it (if present)
+        after build_prompt() so the result reflects the skills resolved for
+        the current turn.  Return an empty set to suppress all optional tools.
+        """
+        return set()

@@ -8,18 +8,34 @@ class ToolRegistry:
     Registry for agent tools.
 
     Allows dynamic registration and execution of tools.
+
+    Tools may be registered as *optional* — they are loaded and executable
+    but hidden from the LLM's tool list by default.  Pass their names via
+    ``include`` in :meth:`get_definitions` to surface them for a turn.
+    This lets callers (e.g. a skill system) selectively activate tools
+    without the registry knowing anything about skills.
     """
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._optional: set[str] = set()
 
-    def register(self, tool: Tool) -> None:
-        """Register a tool."""
+    def register(self, tool: Tool, optional: bool = False) -> None:
+        """Register a tool.
+
+        Args:
+            tool: The tool to register.
+            optional: If True the tool is hidden from :meth:`get_definitions`
+                unless its name appears in the ``include`` argument.
+        """
         self._tools[tool.name] = tool
+        if optional:
+            self._optional.add(tool.name)
 
     def unregister(self, name: str) -> None:
         """Unregister a tool by name."""
         self._tools.pop(name, None)
+        self._optional.discard(name)
 
     def get(self, name: str) -> Tool | None:
         """Get a tool by name."""
@@ -29,8 +45,24 @@ class ToolRegistry:
         """Check if a tool is registered."""
         return name in self._tools
 
-    def get_definitions(self) -> list[dict[str, object]]:
-        """Get all tool definitions in OpenAI format."""
+    def get_definitions(
+        self, include: "set[str] | None" = None
+    ) -> list[dict[str, object]]:
+        """Get tool definitions in OpenAI format.
+
+        Args:
+            include: Optional set of optional-tool names to surface.
+                Optional tools whose names are *not* in this set are omitted.
+                Non-optional tools are always included.
+                Pass ``None`` (default) to include only non-optional tools —
+                preserving backwards-compatible behaviour for callers that
+                never register optional tools.
+        """
+        visible = [
+            t
+            for name, t in self._tools.items()
+            if name not in self._optional or (include is not None and name in include)
+        ]
         return [
             {
                 "type": "function",
@@ -40,7 +72,7 @@ class ToolRegistry:
                     "parameters": tool.parameters,
                 },
             }
-            for tool in self._tools.values()
+            for tool in visible
         ]
 
     async def execute(

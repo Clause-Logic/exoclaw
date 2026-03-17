@@ -108,9 +108,7 @@ class AgentLoop:
                     if result and isinstance(result, str):
                         ctx.append(result)
                 except Exception:
-                    self._log.exception(
-                        "system_context_error", tool=getattr(tool, "name", "?")
-                    )
+                    self._log.exception("system_context_error", tool=getattr(tool, "name", "?"))
         return ctx
 
     @staticmethod
@@ -382,7 +380,9 @@ class AgentLoop:
             )
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
-        self._log.info("message_received", channel=msg.channel, sender_id=msg.sender_id, preview=preview)
+        self._log.info(
+            "message_received", channel=msg.channel, sender_id=msg.sender_id, preview=preview
+        )
 
         sid = session_key or msg.session_key
 
@@ -463,7 +463,9 @@ class AgentLoop:
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-        self._log.info("response_sent", channel=msg.channel, sender_id=msg.sender_id, preview=preview)
+        self._log.info(
+            "response_sent", channel=msg.channel, sender_id=msg.sender_id, preview=preview
+        )
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,

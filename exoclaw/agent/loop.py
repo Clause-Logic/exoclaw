@@ -17,6 +17,7 @@ from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.bus.events import InboundMessage, OutboundMessage
 from exoclaw.bus.protocol import Bus
 from exoclaw.executor import DirectExecutor, Executor
+from exoclaw.iteration_policy import IterationPolicy
 from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import ToolCallRequest
 
@@ -58,11 +59,13 @@ class AgentLoop:
         on_tool_calls: Callable[["list[ToolCallRequest]"], Awaitable[None]] | None = None,
         # Called after each tool result (tool_call, result) — for streaming previews.
         on_tool_result: Callable[["ToolCallRequest", str], Awaitable[None]] | None = None,
+        iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
         logger: FilteringBoundLogger | None = None,
     ) -> None:
         self.bus = bus
         self._executor: Executor = executor or DirectExecutor()
+        self._iteration_policy = iteration_policy
         self.provider = provider
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
@@ -134,21 +137,21 @@ class AgentLoop:
     async def _should_continue(self, iteration: int, tools_used: list[str]) -> bool:
         """Check whether the loop should keep iterating.
 
-        If the executor implements ``should_continue``, delegate to it.
+        If an ``IterationPolicy`` was provided, delegate to it.
         Otherwise fall back to the hard ``max_iterations`` cap.
         """
-        if hasattr(self._executor, "should_continue"):
-            return await self._executor.should_continue(iteration, tools_used)  # type: ignore[union-attr]
+        if self._iteration_policy is not None:
+            return await self._iteration_policy.should_continue(iteration, tools_used)
         return iteration < self.max_iterations
 
     async def _build_limit_message(self, iteration: int, tools_used: list[str]) -> str:
         """Build the message shown when the iteration limit is reached.
 
-        If the executor implements ``on_limit_reached``, delegate to it.
+        If an ``IterationPolicy`` was provided, delegate to it.
         Otherwise return a default message.
         """
-        if hasattr(self._executor, "on_limit_reached"):
-            return await self._executor.on_limit_reached(iteration, tools_used)  # type: ignore[union-attr]
+        if self._iteration_policy is not None:
+            return await self._iteration_policy.on_limit_reached(iteration, tools_used)
         return (
             f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
             "without completing the task. You can try breaking the task into smaller steps."

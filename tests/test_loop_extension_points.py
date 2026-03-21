@@ -361,32 +361,32 @@ class TestOnMaxIterations:
 
 
 # ---------------------------------------------------------------------------
-# Executor.should_continue / on_limit_reached (optional duck-typed methods)
+# IterationPolicy — pluggable termination strategy
 # ---------------------------------------------------------------------------
 
 
-class TestExecutorShouldContinue:
-    async def test_executor_should_continue_controls_loop(self) -> None:
-        """When the executor has should_continue(), it replaces the max_iterations check."""
-        from exoclaw.executor import DirectExecutor
+class TestIterationPolicy:
+    async def test_policy_controls_loop(self) -> None:
+        """When an IterationPolicy is provided, it replaces the max_iterations check."""
 
-        class PolicyExecutor(DirectExecutor):
+        class StopAt3:
             def __init__(self) -> None:
-                super().__init__()
                 self.call_count = 0
 
             async def should_continue(self, iteration: int, tools_used: list[str]) -> bool:
                 self.call_count += 1
-                return iteration < 3  # allow 3 iterations regardless of max_iterations
+                return iteration < 3
 
-        executor = PolicyExecutor()
+            async def on_limit_reached(self, iteration: int, tools_used: list[str]) -> str:
+                return "policy stopped"
 
-        # Always return tool calls so it loops until policy stops it
+        policy = StopAt3()
+
         tc = _make_tool_call("looping_tool")
         tool_resp = _make_response(has_tool_calls=True)
         tool_resp.tool_calls = [tc]
 
-        loop, _ = _make_loop(max_iterations=100, executor=executor)
+        loop, _ = _make_loop(max_iterations=100, iteration_policy=policy)
         loop.provider.chat = AsyncMock(return_value=tool_resp)
         loop.tools.execute = AsyncMock(return_value="ok")
 
@@ -394,26 +394,23 @@ class TestExecutorShouldContinue:
 
         # Should have stopped at 3 iterations, not 100
         assert len(tools_used) == 3
-        assert executor.call_count > 0
+        assert policy.call_count > 0
 
-    async def test_executor_on_limit_reached_custom_message(self) -> None:
-        """When the executor has on_limit_reached(), it provides the limit message."""
-        from exoclaw.executor import DirectExecutor
+    async def test_policy_custom_limit_message(self) -> None:
+        """on_limit_reached() provides the termination message."""
 
-        class PolicyExecutor(DirectExecutor):
+        class CustomMessage:
             async def should_continue(self, iteration: int, tools_used: list[str]) -> bool:
                 return iteration < 1
 
             async def on_limit_reached(self, iteration: int, tools_used: list[str]) -> str:
                 return f"Custom limit hit at {iteration} iterations, used: {', '.join(tools_used)}"
 
-        executor = PolicyExecutor()
-
         tc = _make_tool_call("my_tool")
         tool_resp = _make_response(has_tool_calls=True)
         tool_resp.tool_calls = [tc]
 
-        loop, _ = _make_loop(max_iterations=100, executor=executor)
+        loop, _ = _make_loop(max_iterations=100, iteration_policy=CustomMessage())
         loop.provider.chat = AsyncMock(return_value=tool_resp)
         loop.tools.execute = AsyncMock(return_value="ok")
 
@@ -422,8 +419,8 @@ class TestExecutorShouldContinue:
         assert "Custom limit hit" in final
         assert "my_tool" in final
 
-    async def test_default_behavior_without_executor_methods(self) -> None:
-        """Without should_continue/on_limit_reached, falls back to max_iterations."""
+    async def test_default_behavior_without_policy(self) -> None:
+        """Without an IterationPolicy, falls back to max_iterations."""
         loop, _ = _make_loop(max_iterations=2)
 
         tc = _make_tool_call("dummy")
@@ -438,18 +435,17 @@ class TestExecutorShouldContinue:
         assert len(tools_used) == 2
         assert "maximum" in final.lower()
 
-    async def test_should_continue_receives_tool_names(self) -> None:
+    async def test_policy_receives_tool_names(self) -> None:
         """should_continue receives accumulated tool names for pattern detection."""
-        from exoclaw.executor import DirectExecutor
-
         captured_tools: list[list[str]] = []
 
-        class SpyExecutor(DirectExecutor):
+        class SpyPolicy:
             async def should_continue(self, iteration: int, tools_used: list[str]) -> bool:
                 captured_tools.append(list(tools_used))
                 return iteration < 3
 
-        executor = SpyExecutor()
+            async def on_limit_reached(self, iteration: int, tools_used: list[str]) -> str:
+                return "stopped"
 
         tc1 = _make_tool_call("search", call_id="tc1")
         tc2 = _make_tool_call("read_file", call_id="tc2")
@@ -459,7 +455,7 @@ class TestExecutorShouldContinue:
         tool_resp2.tool_calls = [tc2]
         final_resp = _make_response(content="done")
 
-        loop, _ = _make_loop(executor=executor)
+        loop, _ = _make_loop(iteration_policy=SpyPolicy())
         loop.provider.chat = AsyncMock(side_effect=[tool_resp1, tool_resp2, final_resp])
         loop.tools.execute = AsyncMock(return_value="ok")
 
@@ -469,3 +465,31 @@ class TestExecutorShouldContinue:
         assert captured_tools[0] == []
         assert captured_tools[1] == ["search"]
         assert captured_tools[2] == ["search", "read_file"]
+
+    async def test_policy_composes_with_any_executor(self) -> None:
+        """IterationPolicy works independently of the executor — they compose orthogonally."""
+        from exoclaw.executor import DirectExecutor
+
+        class CustomExecutor(DirectExecutor):
+            """Simulates a Temporal/custom executor — no iteration methods."""
+            pass
+
+        class StopAt2:
+            async def should_continue(self, iteration: int, tools_used: list[str]) -> bool:
+                return iteration < 2
+
+            async def on_limit_reached(self, iteration: int, tools_used: list[str]) -> str:
+                return "policy stopped with custom executor"
+
+        tc = _make_tool_call("tool_a")
+        tool_resp = _make_response(has_tool_calls=True)
+        tool_resp.tool_calls = [tc]
+
+        loop, _ = _make_loop(executor=CustomExecutor(), iteration_policy=StopAt2())
+        loop.provider.chat = AsyncMock(return_value=tool_resp)
+        loop.tools.execute = AsyncMock(return_value="ok")
+
+        final, tools_used, _ = await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        assert len(tools_used) == 2
+        assert "policy stopped with custom executor" in final

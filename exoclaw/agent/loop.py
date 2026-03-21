@@ -422,6 +422,7 @@ class AgentLoop:
                 channel=channel,
                 chat_id=chat_id,
                 content=final_content or "Background task completed.",
+                metadata=msg.metadata or {},
             )
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content

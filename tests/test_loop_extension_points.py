@@ -472,6 +472,7 @@ class TestIterationPolicy:
 
         class CustomExecutor(DirectExecutor):
             """Simulates a Temporal/custom executor — no iteration methods."""
+
             pass
 
         class StopAt2:

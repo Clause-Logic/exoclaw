@@ -418,11 +418,13 @@ class AgentLoop:
             )
             final_content, _, all_msgs = await self._run_agent_loop(initial)
             await self._executor.record(self.conversation, sid, all_msgs[len(initial) - 1 :])
+            sys_meta = dict(msg.metadata or {})
+            sys_meta.setdefault("session_key", sid)
             return OutboundMessage(
                 channel=channel,
                 chat_id=chat_id,
                 content=final_content or "Background task completed.",
-                metadata=msg.metadata or {},
+                metadata=sys_meta,
             )
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
@@ -512,11 +514,13 @@ class AgentLoop:
         self._log.info(
             "response_sent", channel=msg.channel, sender_id=msg.sender_id, preview=preview
         )
+        meta = dict(msg.metadata or {})
+        meta.setdefault("session_key", sid)
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=final_content,
-            metadata=msg.metadata or {},
+            metadata=meta,
         )
 
     async def process_direct(

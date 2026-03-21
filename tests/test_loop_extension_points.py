@@ -494,3 +494,89 @@ class TestIterationPolicy:
 
         assert len(tools_used) == 2
         assert "policy stopped with custom executor" in final
+
+
+# ---------------------------------------------------------------------------
+# on_context_overflow — ContextWindowExceededError recovery
+# ---------------------------------------------------------------------------
+
+
+class TestContextOverflow:
+    async def test_overflow_recovered_with_handler(self) -> None:
+        """When provider raises ContextWindowExceededError and handler compacts, loop retries."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        call_count = 0
+
+        async def mock_chat(*args: object, **kwargs: object) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ContextWindowExceededError("prompt too long")
+            return _make_response(content="recovered")
+
+        async def compactor(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+            return [m for m in messages if m.get("role") == "user"]
+
+        loop, _ = _make_loop(on_context_overflow=compactor)
+        loop.provider.chat = AsyncMock(side_effect=mock_chat)
+
+        final, _, _ = await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        assert final == "recovered"
+        assert call_count == 2
+
+    async def test_overflow_unrecoverable_without_handler(self) -> None:
+        """Without on_context_overflow, ContextWindowExceededError stops the loop."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(side_effect=ContextWindowExceededError("too big"))
+
+        final, _, _ = await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        assert "context window" in final.lower()
+
+    async def test_overflow_handler_returns_none_gives_up(self) -> None:
+        """When handler returns None, loop gives up."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        async def no_help(messages: list[dict[str, object]]) -> None:
+            return None
+
+        loop, _ = _make_loop(on_context_overflow=no_help)
+        loop.provider.chat = AsyncMock(side_effect=ContextWindowExceededError("too big"))
+
+        final, _, _ = await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        assert "context window" in final.lower()
+
+    async def test_overflow_during_tool_loop(self) -> None:
+        """Overflow mid-tool-loop compacts and continues."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        call_count = 0
+
+        async def mock_chat(*args: object, **kwargs: object) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise ContextWindowExceededError("context full")
+            if call_count == 1:
+                tc = _make_tool_call("search")
+                resp = _make_response(has_tool_calls=True)
+                resp.tool_calls = [tc]
+                return resp
+            return _make_response(content="done after compact")
+
+        async def compactor(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+            return [messages[0]]
+
+        loop, _ = _make_loop(on_context_overflow=compactor)
+        loop.provider.chat = AsyncMock(side_effect=mock_chat)
+        loop.tools.execute = AsyncMock(return_value="result")
+
+        final, _, _ = await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        assert final == "done after compact"
+        assert call_count == 3

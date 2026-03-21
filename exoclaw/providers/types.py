@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from typing import Optional, Required, TypedDict, Union
 
 
+class ContextWindowExceededError(Exception):
+    """Raised by providers when the prompt exceeds the model's context window."""
+
+
 @dataclass
 class ToolCallRequest:
     """A tool call request from the LLM."""

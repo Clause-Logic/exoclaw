@@ -2,6 +2,7 @@
 
 from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import (
+    ContextWindowExceededError,
     JSONSchema,
     LLMResponse,
     ResponseFormat,
@@ -12,6 +13,7 @@ from exoclaw.providers.types import (
 )
 
 __all__ = [
+    "ContextWindowExceededError",
     "JSONSchema",
     "LLMProvider",
     "LLMResponse",

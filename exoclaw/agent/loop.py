@@ -131,6 +131,29 @@ class AgentLoop:
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    async def _should_continue(self, iteration: int, tools_used: list[str]) -> bool:
+        """Check whether the loop should keep iterating.
+
+        If the executor implements ``should_continue``, delegate to it.
+        Otherwise fall back to the hard ``max_iterations`` cap.
+        """
+        if hasattr(self._executor, "should_continue"):
+            return await self._executor.should_continue(iteration, tools_used)  # type: ignore[union-attr]
+        return iteration < self.max_iterations
+
+    async def _build_limit_message(self, iteration: int, tools_used: list[str]) -> str:
+        """Build the message shown when the iteration limit is reached.
+
+        If the executor implements ``on_limit_reached``, delegate to it.
+        Otherwise return a default message.
+        """
+        if hasattr(self._executor, "on_limit_reached"):
+            return await self._executor.on_limit_reached(iteration, tools_used)  # type: ignore[union-attr]
+        return (
+            f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+            "without completing the task. You can try breaking the task into smaller steps."
+        )
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict[str, object]],
@@ -142,7 +165,7 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
 
-        while iteration < self.max_iterations:
+        while await self._should_continue(iteration, tools_used):
             iteration += 1
 
             _include = (
@@ -245,12 +268,9 @@ class AgentLoop:
                 final_content = clean
                 break
 
-        if final_content is None and iteration >= self.max_iterations:
+        if final_content is None and not await self._should_continue(iteration, tools_used):
             self._log.warning("max_iterations_reached", max_iterations=self.max_iterations)
-            final_content = (
-                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
-                "without completing the task. You can try breaking the task into smaller steps."
-            )
+            final_content = await self._build_limit_message(iteration, tools_used)
             if self._on_max_iterations and self._current_ctx:
                 ctx = self._current_ctx
                 asyncio.ensure_future(

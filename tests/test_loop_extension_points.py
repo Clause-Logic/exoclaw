@@ -358,3 +358,114 @@ class TestOnMaxIterations:
         await asyncio.sleep(0)
 
         assert fired.is_set(), "on_max_iterations was not called when iteration limit was reached"
+
+
+# ---------------------------------------------------------------------------
+# Executor.should_continue / on_limit_reached (optional duck-typed methods)
+# ---------------------------------------------------------------------------
+
+
+class TestExecutorShouldContinue:
+    async def test_executor_should_continue_controls_loop(self) -> None:
+        """When the executor has should_continue(), it replaces the max_iterations check."""
+        from exoclaw.executor import DirectExecutor
+
+        class PolicyExecutor(DirectExecutor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.call_count = 0
+
+            async def should_continue(self, iteration: int, tools_used: list[str]) -> bool:
+                self.call_count += 1
+                return iteration < 3  # allow 3 iterations regardless of max_iterations
+
+        executor = PolicyExecutor()
+
+        # Always return tool calls so it loops until policy stops it
+        tc = _make_tool_call("looping_tool")
+        tool_resp = _make_response(has_tool_calls=True)
+        tool_resp.tool_calls = [tc]
+
+        loop, _ = _make_loop(max_iterations=100, executor=executor)
+        loop.provider.chat = AsyncMock(return_value=tool_resp)
+        loop.tools.execute = AsyncMock(return_value="ok")
+
+        final, tools_used, _ = await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        # Should have stopped at 3 iterations, not 100
+        assert len(tools_used) == 3
+        assert executor.call_count > 0
+
+    async def test_executor_on_limit_reached_custom_message(self) -> None:
+        """When the executor has on_limit_reached(), it provides the limit message."""
+        from exoclaw.executor import DirectExecutor
+
+        class PolicyExecutor(DirectExecutor):
+            async def should_continue(self, iteration: int, tools_used: list[str]) -> bool:
+                return iteration < 1
+
+            async def on_limit_reached(self, iteration: int, tools_used: list[str]) -> str:
+                return f"Custom limit hit at {iteration} iterations, used: {', '.join(tools_used)}"
+
+        executor = PolicyExecutor()
+
+        tc = _make_tool_call("my_tool")
+        tool_resp = _make_response(has_tool_calls=True)
+        tool_resp.tool_calls = [tc]
+
+        loop, _ = _make_loop(max_iterations=100, executor=executor)
+        loop.provider.chat = AsyncMock(return_value=tool_resp)
+        loop.tools.execute = AsyncMock(return_value="ok")
+
+        final, _, _ = await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        assert "Custom limit hit" in final
+        assert "my_tool" in final
+
+    async def test_default_behavior_without_executor_methods(self) -> None:
+        """Without should_continue/on_limit_reached, falls back to max_iterations."""
+        loop, _ = _make_loop(max_iterations=2)
+
+        tc = _make_tool_call("dummy")
+        tool_resp = _make_response(has_tool_calls=True)
+        tool_resp.tool_calls = [tc]
+
+        loop.provider.chat = AsyncMock(return_value=tool_resp)
+        loop.tools.execute = AsyncMock(return_value="ok")
+
+        final, tools_used, _ = await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        assert len(tools_used) == 2
+        assert "maximum" in final.lower()
+
+    async def test_should_continue_receives_tool_names(self) -> None:
+        """should_continue receives accumulated tool names for pattern detection."""
+        from exoclaw.executor import DirectExecutor
+
+        captured_tools: list[list[str]] = []
+
+        class SpyExecutor(DirectExecutor):
+            async def should_continue(self, iteration: int, tools_used: list[str]) -> bool:
+                captured_tools.append(list(tools_used))
+                return iteration < 3
+
+        executor = SpyExecutor()
+
+        tc1 = _make_tool_call("search", call_id="tc1")
+        tc2 = _make_tool_call("read_file", call_id="tc2")
+        tool_resp1 = _make_response(has_tool_calls=True)
+        tool_resp1.tool_calls = [tc1]
+        tool_resp2 = _make_response(has_tool_calls=True)
+        tool_resp2.tool_calls = [tc2]
+        final_resp = _make_response(content="done")
+
+        loop, _ = _make_loop(executor=executor)
+        loop.provider.chat = AsyncMock(side_effect=[tool_resp1, tool_resp2, final_resp])
+        loop.tools.execute = AsyncMock(return_value="ok")
+
+        await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        # First check: no tools yet; second: ["search"]; third: ["search", "read_file"]
+        assert captured_tools[0] == []
+        assert captured_tools[1] == ["search"]
+        assert captured_tools[2] == ["search", "read_file"]

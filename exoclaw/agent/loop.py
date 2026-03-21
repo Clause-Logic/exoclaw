@@ -406,7 +406,7 @@ class AgentLoop:
                 msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
             )
             self._log.info("system_message_received", sender_id=msg.sender_id)
-            sid = f"{channel}:{chat_id}"
+            sid = msg.session_key_override or f"{channel}:{chat_id}"
             plugin_ctx = self._collect_plugin_context()
             initial = await self._executor.build_prompt(
                 self.conversation,

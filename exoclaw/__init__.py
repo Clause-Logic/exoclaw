@@ -7,5 +7,6 @@ __logo__ = "🦀"
 
 from exoclaw.app import Exoclaw
 from exoclaw.executor import DirectExecutor, Executor
+from exoclaw.iteration_policy import IterationPolicy
 
-__all__ = ["DirectExecutor", "Executor", "Exoclaw"]
+__all__ = ["DirectExecutor", "Executor", "Exoclaw", "IterationPolicy"]

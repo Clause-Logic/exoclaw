@@ -17,6 +17,7 @@ from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.bus.events import InboundMessage, OutboundMessage
 from exoclaw.bus.protocol import Bus
 from exoclaw.executor import DirectExecutor, Executor
+from exoclaw.iteration_policy import IterationPolicy
 from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import ToolCallRequest
 
@@ -58,11 +59,13 @@ class AgentLoop:
         on_tool_calls: Callable[["list[ToolCallRequest]"], Awaitable[None]] | None = None,
         # Called after each tool result (tool_call, result) — for streaming previews.
         on_tool_result: Callable[["ToolCallRequest", str], Awaitable[None]] | None = None,
+        iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
         logger: FilteringBoundLogger | None = None,
     ) -> None:
         self.bus = bus
         self._executor: Executor = executor or DirectExecutor()
+        self._iteration_policy = iteration_policy
         self.provider = provider
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
@@ -131,6 +134,29 @@ class AgentLoop:
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    async def _should_continue(self, iteration: int, tools_used: list[str]) -> bool:
+        """Check whether the loop should keep iterating.
+
+        If an ``IterationPolicy`` was provided, delegate to it.
+        Otherwise fall back to the hard ``max_iterations`` cap.
+        """
+        if self._iteration_policy is not None:
+            return await self._iteration_policy.should_continue(iteration, tools_used)
+        return iteration < self.max_iterations
+
+    async def _build_limit_message(self, iteration: int, tools_used: list[str]) -> str:
+        """Build the message shown when the iteration limit is reached.
+
+        If an ``IterationPolicy`` was provided, delegate to it.
+        Otherwise return a default message.
+        """
+        if self._iteration_policy is not None:
+            return await self._iteration_policy.on_limit_reached(iteration, tools_used)
+        return (
+            f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+            "without completing the task. You can try breaking the task into smaller steps."
+        )
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict[str, object]],
@@ -142,7 +168,7 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
 
-        while iteration < self.max_iterations:
+        while await self._should_continue(iteration, tools_used):
             iteration += 1
 
             _include = (
@@ -245,12 +271,9 @@ class AgentLoop:
                 final_content = clean
                 break
 
-        if final_content is None and iteration >= self.max_iterations:
+        if final_content is None and not await self._should_continue(iteration, tools_used):
             self._log.warning("max_iterations_reached", max_iterations=self.max_iterations)
-            final_content = (
-                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
-                "without completing the task. You can try breaking the task into smaller steps."
-            )
+            final_content = await self._build_limit_message(iteration, tools_used)
             if self._on_max_iterations and self._current_ctx:
                 ctx = self._current_ctx
                 asyncio.ensure_future(

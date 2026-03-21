@@ -28,6 +28,7 @@ from exoclaw.bus.protocol import Bus
 from exoclaw.channels.manager import ChannelManager
 from exoclaw.channels.protocol import Channel
 from exoclaw.executor import Executor
+from exoclaw.iteration_policy import IterationPolicy
 
 if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
@@ -52,10 +53,12 @@ class Exoclaw:
         max_tokens: int = 8192,
         max_iterations: int = 40,
         reasoning_effort: str | None = None,
+        iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
         logger: FilteringBoundLogger | None = None,
     ) -> None:
         self.provider = provider
+        self.iteration_policy = iteration_policy
         self.executor = executor
         self.conversation = conversation
         self.channels = channels or []
@@ -91,6 +94,7 @@ class Exoclaw:
             max_iterations=self.max_iterations,
             reasoning_effort=self.reasoning_effort,
             tools=self.tools,
+            iteration_policy=self.iteration_policy,
             executor=self.executor,
             logger=self._log,
         )

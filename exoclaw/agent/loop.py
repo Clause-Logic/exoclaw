@@ -19,7 +19,7 @@ from exoclaw.bus.protocol import Bus
 from exoclaw.executor import DirectExecutor, Executor
 from exoclaw.iteration_policy import IterationPolicy
 from exoclaw.providers.protocol import LLMProvider
-from exoclaw.providers.types import ToolCallRequest
+from exoclaw.providers.types import ContextWindowExceededError, ToolCallRequest
 
 _UNSET: object = object()  # sentinel: distinguishes "not provided" from explicit None
 
@@ -59,6 +59,12 @@ class AgentLoop:
         on_tool_calls: Callable[["list[ToolCallRequest]"], Awaitable[None]] | None = None,
         # Called after each tool result (tool_call, result) — for streaming previews.
         on_tool_result: Callable[["ToolCallRequest", str], Awaitable[None]] | None = None,
+        # Called when the provider raises ContextWindowExceededError. Receives the current
+        # message list and should return a compacted version, or None to give up.
+        on_context_overflow: Callable[
+            ["list[dict[str, object]]"], Awaitable["list[dict[str, object]] | None"]
+        ]
+        | None = None,
         iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
         logger: FilteringBoundLogger | None = None,
@@ -79,6 +85,7 @@ class AgentLoop:
         self._on_max_iterations = on_max_iterations
         self._on_tool_calls = on_tool_calls
         self._on_tool_result = on_tool_result
+        self._on_context_overflow = on_context_overflow
 
         self.conversation = conversation
 
@@ -176,15 +183,30 @@ class AgentLoop:
                 if hasattr(self.conversation, "active_tools")
                 else None
             )
-            response = await self._executor.chat(
-                self.provider,
-                messages=messages,
-                tools=self.tools.get_definitions(include=_include),
-                model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                reasoning_effort=self.reasoning_effort,
-            )
+            try:
+                response = await self._executor.chat(
+                    self.provider,
+                    messages=messages,
+                    tools=self.tools.get_definitions(include=_include),
+                    model=self.model,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    reasoning_effort=self.reasoning_effort,
+                )
+            except ContextWindowExceededError:
+                if self._on_context_overflow:
+                    self._log.warning("context_overflow_detected", iteration=iteration)
+                    compacted = await self._on_context_overflow(messages)
+                    if compacted is not None:
+                        self._log.info("context_overflow_recovered")
+                        messages = compacted
+                        continue
+                self._log.error("context_overflow_unrecoverable")
+                final_content = (
+                    "The conversation exceeded the model's context window "
+                    "and I couldn't recover. Try starting a new session."
+                )
+                break
 
             if response.has_tool_calls:
                 if on_progress:

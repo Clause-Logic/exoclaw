@@ -35,7 +35,7 @@ exoclaw cuts the knot. Five protocols, one loop, ~2,000 lines. Everything else �
 
 ## How it works
 
-exoclaw is six protocols and a loop.
+exoclaw is seven protocols and a loop.
 
 ```
 InboundMessage → Bus → AgentLoop → LLM → Tools → Bus → OutboundMessage → Channel
@@ -57,6 +57,7 @@ Every one of those nouns is a protocol. Swap any of them out. No inheritance req
 | `Channel` | optional | — | Pass channels you need, or use `process_direct()` |
 | `Bus` | optional | `MessageBus` | Asyncio queues, sufficient for single-process |
 | `Executor` | optional | `DirectExecutor` | Inline execution, zero overhead |
+| `IterationPolicy` | optional | — | Hard `max_iterations` cap when absent |
 
 ---
 
@@ -268,6 +269,34 @@ This is how you run exoclaw in different execution environments (workflow engine
 **Plugin ideas:**
 - `exoclaw-executor-temporal` — run each operation as a Temporal activity with per-operation timeouts and retry policies
 - `exoclaw-executor-celery` — route tool execution through Celery workers
+
+---
+
+### `IterationPolicy`
+
+```python
+class IterationPolicy(Protocol):
+    async def should_continue(self, iteration: int, tools_used: list[str]) -> bool: ...
+    async def on_limit_reached(self, iteration: int, tools_used: list[str]) -> str: ...
+```
+
+Controls when the agent loop stops iterating. Without a policy, the loop uses a hard `max_iterations` counter (default 40). With a policy, you can implement smarter termination — pattern detection, adaptive budgets, or anything else.
+
+The policy is **orthogonal to the executor**. A Temporal executor handles *how* operations run; an iteration policy handles *when to stop*. Compose them independently:
+
+```python
+from exoclaw import Exoclaw
+
+app = Exoclaw(
+    provider=provider,
+    conversation=conversation,
+    executor=temporal_executor,           # how to run operations
+    iteration_policy=loop_detection,      # when to stop iterating
+)
+```
+
+**Plugin ideas:**
+- `exoclaw-loop-detection` — openclaw-style pattern detection (repeat, ping-pong, circuit breaker) instead of a hard cap
 
 ---
 
@@ -504,6 +533,7 @@ The loop collects `system_context()` from all registered tools before each `buil
 exoclaw/
   app.py                   # Exoclaw — the composition root
   executor.py              # Executor protocol + DirectExecutor
+  iteration_policy.py      # IterationPolicy protocol
   agent/
     loop.py                # AgentLoop — the core processing engine
     conversation.py        # Conversation protocol

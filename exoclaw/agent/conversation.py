@@ -28,7 +28,6 @@ class Conversation(Protocol):
         chat_id: str | None = None,
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
-        skills: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Return the full messages list to send to the LLM."""
         ...

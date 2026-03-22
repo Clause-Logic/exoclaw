@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol, cast, runtime_checkable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+
+if TYPE_CHECKING:
+    from exoclaw.executor import Executor
 
 
 @dataclass
@@ -17,11 +20,17 @@ class ToolContext:
             ...
 
     Tools that don't need it keep execute(**kwargs) and the registry handles both.
+
+    The optional ``executor`` field gives tools access to the environment's
+    durable execution layer (DBOS, Temporal, etc.). Tools that want durable
+    I/O (e.g. LLM calls with automatic retries and checkpointing) can use
+    ``ctx.executor.chat(...)`` instead of calling the provider directly.
     """
 
     session_key: str
     channel: str
     chat_id: str
+    executor: Executor | None = field(default=None, repr=False)
 
 
 @runtime_checkable

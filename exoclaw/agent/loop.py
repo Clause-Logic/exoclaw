@@ -398,6 +398,7 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None | object = _UNSET,
+        **kwargs: Any,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -471,6 +472,7 @@ class AgentLoop:
             chat_id=msg.chat_id,
             media=msg.media if msg.media else None,
             plugin_context=plugin_ctx or None,
+            **kwargs,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -530,10 +532,16 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        **kwargs: Any,
     ) -> str:
-        """Process a message directly (for CLI or cron usage)."""
+        """Process a message directly (for CLI or cron usage).
+
+        Extra keyword arguments are forwarded to conversation.build_prompt,
+        allowing callers to pass domain-specific context (e.g. skill_names,
+        turn_context) without the loop needing to know about them.
+        """
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         response = await self._process_message(
-            msg, session_key=session_key, on_progress=on_progress
+            msg, session_key=session_key, on_progress=on_progress, **kwargs
         )
         return response.content if response else ""

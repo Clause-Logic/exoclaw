@@ -454,7 +454,12 @@ class AgentLoop:
             )
 
         self._notify_tools_inbound(msg)
-        self._current_ctx = ToolContext(session_key=sid, channel=msg.channel, chat_id=msg.chat_id)
+        self._current_ctx = ToolContext(
+            session_key=sid,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            executor=self._executor,
+        )
 
         plugin_ctx = self._collect_plugin_context()
         if self._on_pre_context:

@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Any, cast
 
 import structlog
 from structlog.typing import FilteringBoundLogger

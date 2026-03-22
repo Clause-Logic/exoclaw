@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import cast
 
 import structlog
 from structlog.typing import FilteringBoundLogger
@@ -398,7 +398,7 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None | object = _UNSET,
-        **kwargs: Any,
+        **kwargs: list[str] | None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
         # System messages: parse origin from chat_id ("channel:chat_id")
@@ -532,7 +532,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
-        **kwargs: Any,
+        **kwargs: list[str] | None,
     ) -> str:
         """Process a message directly (for CLI or cron usage).
 

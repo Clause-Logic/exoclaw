@@ -8,7 +8,7 @@ retry strategies, or execution environments).
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import ToolContext
@@ -53,7 +53,7 @@ class Executor(Protocol):
         chat_id: str | None = None,
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
-        **kwargs: Any,
+        **kwargs: list[str] | None,
     ) -> list[dict[str, object]]: ...
 
     async def record(
@@ -122,7 +122,7 @@ class DirectExecutor:
         chat_id: str | None = None,
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
-        **kwargs: Any,
+        **kwargs: list[str] | None,
     ) -> list[dict[str, object]]:
         return await conversation.build_prompt(
             session_id,

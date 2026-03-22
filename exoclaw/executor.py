@@ -53,6 +53,7 @@ class Executor(Protocol):
         chat_id: str | None = None,
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
+        skills: list[str] | None = None,
     ) -> list[dict[str, object]]: ...
 
     async def record(
@@ -121,6 +122,7 @@ class DirectExecutor:
         chat_id: str | None = None,
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
+        skills: list[str] | None = None,
     ) -> list[dict[str, object]]:
         return await conversation.build_prompt(
             session_id,
@@ -129,6 +131,7 @@ class DirectExecutor:
             chat_id=chat_id,
             media=media,
             plugin_context=plugin_context,
+            skills=skills,
         )
 
     async def record(

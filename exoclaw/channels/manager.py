@@ -42,11 +42,11 @@ class ChannelManager:
         try:
             await channel.start(self.bus)
         except Exception as e:
-            self._log.error("channel_start_failed", channel=name, error=str(e))
+            self._log.error("channel_start_error", channel=name, error=str(e))
 
     async def start_all(self) -> None:
         if not self.channels:
-            self._log.warning("no_channels_enabled")
+            self._log.warning("no_channels")
             return
 
         self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
@@ -54,11 +54,11 @@ class ChannelManager:
         tasks = [
             asyncio.create_task(self._start_channel(name, ch)) for name, ch in self.channels.items()
         ]
-        self._log.info("channels_starting", channels=list(self.channels))
+        self._log.info("channels_start", channels=list(self.channels))
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def stop_all(self) -> None:
-        self._log.info("channels_stopping")
+        self._log.info("channels_stop")
 
         if self._dispatch_task:
             self._dispatch_task.cancel()
@@ -70,12 +70,10 @@ class ChannelManager:
         for name, channel in self.channels.items():
             try:
                 await channel.stop()
-                self._log.info("channel_stopped", channel=name)
             except Exception as e:
-                self._log.error("channel_stop_failed", channel=name, error=str(e))
+                self._log.error("channel_stop_error", channel=name, error=str(e))
 
     async def _dispatch_outbound(self) -> None:
-        self._log.info("outbound_dispatcher_started")
 
         while True:
             try:
@@ -92,7 +90,7 @@ class ChannelManager:
                     try:
                         await channel.send(msg)
                     except Exception as e:
-                        self._log.error("outbound_send_failed", channel=msg.channel, error=str(e))
+                        self._log.error("outbound_send_error", channel=msg.channel, error=str(e))
                 else:
                     self._log.warning("unknown_channel", channel=msg.channel)
 

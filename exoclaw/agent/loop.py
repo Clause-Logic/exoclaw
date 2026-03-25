@@ -118,7 +118,9 @@ class AgentLoop:
                     if result and isinstance(result, str):
                         ctx.append(result)
                 except Exception:
-                    self._log.exception("system_context_error", tool=getattr(tool, "name", "?"))
+                    self._log.exception(
+                        "system_context_error", **{"tool.name": getattr(tool, "name", "?")}
+                    )
         return ctx
 
     @staticmethod
@@ -195,13 +197,12 @@ class AgentLoop:
                 )
             except ContextWindowExceededError:
                 if self._on_context_overflow:
-                    self._log.warning("context_overflow_detected", iteration=iteration)
                     compacted = await self._on_context_overflow(messages)
                     if compacted is not None:
-                        self._log.info("context_overflow_recovered")
+                        self._log.info("context_compact", iteration=iteration)
                         messages = compacted
                         continue
-                self._log.error("context_overflow_unrecoverable")
+                self._log.error("context_overflow", iteration=iteration)
                 final_content = (
                     "The conversation exceeded the model's context window "
                     "and I couldn't recover. Try starting a new session."
@@ -240,7 +241,9 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                    self._log.info("tool_called", tool=tool_call.name, args=args_str[:200])
+                    self._log.info(
+                        "tool_call", **{"tool.name": tool_call.name}, args=args_str[:200]
+                    )
                     if self._on_pre_tool:
                         sk = self._current_ctx.session_key if self._current_ctx else ""
                         rejection = await self._executor.run_hook(
@@ -248,7 +251,9 @@ class AgentLoop:
                         )
                         if rejection:
                             self._log.info(
-                                "tool_rejected", tool=tool_call.name, reason=str(rejection)[:100]
+                                "tool_reject",
+                                **{"tool.name": tool_call.name},
+                                reason=str(rejection)[:100],
                             )
                             result = str(rejection)
                         else:
@@ -281,7 +286,7 @@ class AgentLoop:
             else:
                 clean = self._strip_think(response.content)
                 if response.finish_reason == "error":
-                    self._log.error("llm_error", content=(clean or "")[:200])
+                    self._log.error("llm_error", **{"error.message": (clean or "")[:200]})
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
                 msg2: dict[str, object] = {"role": "assistant", "content": clean}
@@ -294,7 +299,7 @@ class AgentLoop:
                 break
 
         if final_content is None and not await self._should_continue(iteration, tools_used):
-            self._log.warning("max_iterations_reached", max_iterations=self.max_iterations)
+            self._log.warning("iteration_limit", **{"iteration.max": self.max_iterations})
             final_content = await self._build_limit_message(iteration, tools_used)
             if self._on_max_iterations and self._current_ctx:
                 ctx = self._current_ctx
@@ -307,7 +312,7 @@ class AgentLoop:
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
-        self._log.info("agent_loop_started")
+        self._log.info("agent_loop_start")
 
         try:
             while self._running:
@@ -334,7 +339,7 @@ class AgentLoop:
                 t.cancel()
             if all_tasks:
                 await asyncio.gather(*all_tasks, return_exceptions=True)
-            self._log.info("agent_loop_stopped")
+            self._log.info("agent_loop_stop")
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""
@@ -376,10 +381,10 @@ class AgentLoop:
                         )
                     )
             except asyncio.CancelledError:
-                self._log.info("task_cancelled", session_key=msg.session_key)
+                self._log.info("task_cancel", **{"session.key": msg.session_key})
                 raise
             except Exception:
-                self._log.exception("message_error", session_key=msg.session_key)
+                self._log.exception("message_error", **{"session.key": msg.session_key})
                 await self.bus.publish_outbound(
                     OutboundMessage(
                         channel=msg.channel,
@@ -391,7 +396,6 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
-        self._log.info("agent_loop_stopping")
 
     async def _process_message(
         self,
@@ -406,7 +410,7 @@ class AgentLoop:
             channel, chat_id = (
                 msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
             )
-            self._log.info("system_message_received", sender_id=msg.sender_id)
+            self._log.info("system_message", **{"sender.id": msg.sender_id})
             sid = msg.session_key_override or f"{channel}:{chat_id}"
             plugin_ctx = self._collect_plugin_context()
             initial = await self._executor.build_prompt(
@@ -430,7 +434,7 @@ class AgentLoop:
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         self._log.info(
-            "message_received", channel=msg.channel, sender_id=msg.sender_id, preview=preview
+            "message_receive", channel=msg.channel, **{"sender.id": msg.sender_id}, preview=preview
         )
 
         sid = session_key or msg.session_key
@@ -519,7 +523,7 @@ class AgentLoop:
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         self._log.info(
-            "response_sent", channel=msg.channel, sender_id=msg.sender_id, preview=preview
+            "response_send", channel=msg.channel, **{"sender.id": msg.sender_id}, preview=preview
         )
         meta = dict(msg.metadata or {})
         meta.setdefault("session_key", sid)

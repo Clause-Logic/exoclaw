@@ -297,6 +297,49 @@ class TestRunAgentLoop:
 
 
 # ---------------------------------------------------------------------------
+# process_turn
+# ---------------------------------------------------------------------------
+
+
+class TestProcessTurn:
+    async def test_returns_content_and_new_messages(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response("done"))
+        loop.conversation.build_prompt = AsyncMock(
+            return_value=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+        )
+
+        final, new_msgs = await loop.process_turn("sess:1", "hi", channel="test", chat_id="c1")
+
+        assert final == "done"
+        # new_msgs should contain user message + assistant response
+        assert len(new_msgs) >= 1
+        assert any(m.get("role") == "assistant" for m in new_msgs)
+        loop.conversation.record.assert_awaited_once()
+
+    async def test_forwards_kwargs_to_build_prompt(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response("ok"))
+        loop.conversation.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
+
+        await loop.process_turn("s", "hi", channel="ch", chat_id="c", skills=["math"])
+
+        _, call_kwargs = loop.conversation.build_prompt.call_args
+        assert call_kwargs.get("skills") == ["math"]
+
+    async def test_on_progress_forwarded(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response("ok"))
+        loop.conversation.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
+        progress = AsyncMock()
+
+        await loop.process_turn("s", "hi", on_progress=progress)
+
+        # No tool calls so progress shouldn't fire, but verify no error
+        loop.conversation.record.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # _process_message
 # ---------------------------------------------------------------------------
 

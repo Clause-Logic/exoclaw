@@ -337,9 +337,7 @@ class AgentLoop:
             plugin_context=plugin_context,
             **kwargs,
         )
-        final_content, _, all_msgs = await self._run_agent_loop(
-            initial, on_progress=on_progress
-        )
+        final_content, _, all_msgs = await self._run_agent_loop(initial, on_progress=on_progress)
         new_msgs = all_msgs[len(initial) - 1 :]
         await self._executor.record(self.conversation, session_id, new_msgs)
         return final_content, new_msgs

@@ -309,6 +309,41 @@ class AgentLoop:
 
         return final_content, tools_used, messages
 
+    async def process_turn(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        media: list[str] | None = None,
+        plugin_context: list[str] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        **kwargs: list[str] | None,
+    ) -> tuple[str | None, list[dict[str, object]]]:
+        """Execute a single turn: build prompt, run agent loop, record.
+
+        This is the core unit of work that durable executors (Temporal, DBOS)
+        can wrap in a workflow for crash recovery. Returns
+        ``(final_content, new_messages)``.
+        """
+        initial = await self._executor.build_prompt(
+            self.conversation,
+            session_id,
+            message,
+            channel=channel,
+            chat_id=chat_id,
+            media=media,
+            plugin_context=plugin_context,
+            **kwargs,
+        )
+        final_content, _, all_msgs = await self._run_agent_loop(
+            initial, on_progress=on_progress
+        )
+        new_msgs = all_msgs[len(initial) - 1 :]
+        await self._executor.record(self.conversation, session_id, new_msgs)
+        return final_content, new_msgs
+
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         self._running = True
@@ -413,16 +448,13 @@ class AgentLoop:
             self._log.info("system_message", **{"sender.id": msg.sender_id})
             sid = msg.session_key_override or f"{channel}:{chat_id}"
             plugin_ctx = self._collect_plugin_context()
-            initial = await self._executor.build_prompt(
-                self.conversation,
+            final_content, _ = await self.process_turn(
                 sid,
                 msg.content,
                 channel=channel,
                 chat_id=chat_id,
                 plugin_context=plugin_ctx or None,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(initial)
-            await self._executor.record(self.conversation, sid, all_msgs[len(initial) - 1 :])
             sys_meta = dict(msg.metadata or {})
             sys_meta.setdefault("session_key", sid)
             return OutboundMessage(
@@ -473,17 +505,6 @@ class AgentLoop:
             if extra:
                 plugin_ctx.append(str(extra))
 
-        initial = await self._executor.build_prompt(
-            self.conversation,
-            sid,
-            msg.content,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            media=msg.media if msg.media else None,
-            plugin_context=plugin_ctx or None,
-            **kwargs,
-        )
-
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
@@ -504,17 +525,20 @@ class AgentLoop:
             if on_progress is _UNSET
             else cast(Callable[..., Awaitable[None]] | None, on_progress)
         )
-        final_content, _, all_msgs = await self._run_agent_loop(
-            initial,
+
+        final_content, new_msgs = await self.process_turn(
+            sid,
+            msg.content,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            media=msg.media if msg.media else None,
+            plugin_context=plugin_ctx or None,
             on_progress=effective_progress,
+            **kwargs,
         )
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-
-        # new_msgs = user message + everything the loop added
-        new_msgs = all_msgs[len(initial) - 1 :]
-        await self._executor.record(self.conversation, sid, new_msgs)
         if self._on_post_turn and new_msgs:
             asyncio.ensure_future(self._on_post_turn(new_msgs, sid, msg.channel, msg.chat_id))
 

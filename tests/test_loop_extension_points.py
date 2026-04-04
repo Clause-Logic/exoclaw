@@ -497,6 +497,47 @@ class TestIterationPolicy:
 
 
 # ---------------------------------------------------------------------------
+# run_turn delegation
+# ---------------------------------------------------------------------------
+
+
+class TestRunTurnDelegation:
+    async def test_process_turn_delegates_to_executor_run_turn(self) -> None:
+        """When executor.run_turn() returns a result, process_turn uses it."""
+        from exoclaw.executor import DirectExecutor
+
+        class DurableExecutor(DirectExecutor):
+            async def run_turn(
+                self,
+                loop: object,
+                session_id: str,
+                message: str,
+                **kwargs: object,
+            ) -> tuple[str | None, list[dict[str, object]]] | None:
+                return ("durable result", [{"role": "assistant", "content": "durable result"}])
+
+        loop, _ = _make_loop(executor=DurableExecutor())
+
+        content, msgs = await loop.process_turn("sess1", "hello")
+
+        assert content == "durable result"
+        assert msgs == [{"role": "assistant", "content": "durable result"}]
+        # build_prompt should NOT have been called — delegation skipped inline path
+        loop.conversation.build_prompt.assert_not_called()
+        loop.conversation.record.assert_not_called()
+
+    async def test_process_turn_falls_back_when_run_turn_returns_none(self) -> None:
+        """When executor.run_turn() returns None, process_turn uses the inline path."""
+        loop, _ = _make_loop()  # DirectExecutor.run_turn returns None
+
+        content, msgs = await loop.process_turn("sess1", "hello")
+
+        # Inline path was used — build_prompt and record should be called
+        loop.conversation.build_prompt.assert_called_once()
+        loop.conversation.record.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # on_context_overflow — ContextWindowExceededError recovery
 # ---------------------------------------------------------------------------
 

@@ -158,6 +158,7 @@ class TestCustomExecutorInLoop:
         executor.chat = AsyncMock(return_value=response)
         executor.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
         executor.record = AsyncMock()
+        executor.run_turn = AsyncMock(return_value=None)
 
         loop = AgentLoop(
             bus=bus,
@@ -241,6 +242,7 @@ class TestCustomExecutorInLoop:
         executor.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
         executor.record = AsyncMock()
         executor.execute_tool = AsyncMock(return_value="tool output")
+        executor.run_turn = AsyncMock(return_value=None)
 
         loop = AgentLoop(
             bus=bus,

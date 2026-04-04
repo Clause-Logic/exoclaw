@@ -325,22 +325,23 @@ class AgentLoop:
 
         If the executor provides a ``run_turn`` method the call is delegated
         to it, allowing durable executors (Temporal, DBOS) to wrap the turn
-        in a workflow for crash recovery.  Otherwise the turn runs inline.
+        in a workflow for crash recovery. Otherwise the turn runs inline.
 
         Returns ``(final_content, new_messages)``.
         """
-        if hasattr(self._executor, "run_turn"):
-            return await self._executor.run_turn(
-                self,
-                session_id,
-                message,
-                channel=channel,
-                chat_id=chat_id,
-                media=media,
-                plugin_context=plugin_context,
-                on_progress=on_progress,
-                **kwargs,
-            )
+        result = await self._executor.run_turn(
+            self,
+            session_id,
+            message,
+            channel=channel,
+            chat_id=chat_id,
+            media=media,
+            plugin_context=plugin_context,
+            on_progress=on_progress,
+            **kwargs,
+        )
+        if result is not None:
+            return result
         return await self._process_turn_inline(
             session_id,
             message,

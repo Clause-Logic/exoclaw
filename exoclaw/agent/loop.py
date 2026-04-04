@@ -323,10 +323,49 @@ class AgentLoop:
     ) -> tuple[str | None, list[dict[str, object]]]:
         """Execute a single turn: build prompt, run agent loop, record.
 
-        This is the core unit of work that durable executors (Temporal, DBOS)
-        can wrap in a workflow for crash recovery. Returns
-        ``(final_content, new_messages)``.
+        If the executor provides a ``run_turn`` method the call is delegated
+        to it, allowing durable executors (Temporal, DBOS) to wrap the turn
+        in a workflow for crash recovery. Otherwise the turn runs inline.
+
+        Returns ``(final_content, new_messages)``.
         """
+        result = await self._executor.run_turn(
+            self,
+            session_id,
+            message,
+            channel=channel,
+            chat_id=chat_id,
+            media=media,
+            plugin_context=plugin_context,
+            on_progress=on_progress,
+            **kwargs,
+        )
+        if result is not None:
+            return result
+        return await self._process_turn_inline(
+            session_id,
+            message,
+            channel=channel,
+            chat_id=chat_id,
+            media=media,
+            plugin_context=plugin_context,
+            on_progress=on_progress,
+            **kwargs,
+        )
+
+    async def _process_turn_inline(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        media: list[str] | None = None,
+        plugin_context: list[str] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        **kwargs: list[str] | None,
+    ) -> tuple[str | None, list[dict[str, object]]]:
+        """The actual turn logic — called directly or from a durable wrapper."""
         initial = await self._executor.build_prompt(
             self.conversation,
             session_id,

@@ -8,13 +8,16 @@ retry strategies, or execution environments).
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import LLMResponse
+
+if TYPE_CHECKING:
+    from exoclaw.agent.loop import AgentLoop
 
 
 @runtime_checkable
@@ -76,6 +79,20 @@ class Executor(Protocol):
         *args: object,
         **kwargs: object,
     ) -> object: ...
+
+    async def run_turn(
+        self,
+        loop: AgentLoop,
+        session_id: str,
+        message: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        media: list[str] | None = None,
+        plugin_context: list[str] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        **kwargs: list[str] | None,
+    ) -> tuple[str | None, list[dict[str, object]]] | None: ...
 
 
 class DirectExecutor:
@@ -157,3 +174,18 @@ class DirectExecutor:
         **kwargs: object,
     ) -> object:
         return await fn(*args, **kwargs)
+
+    async def run_turn(
+        self,
+        loop: AgentLoop,
+        session_id: str,
+        message: str,
+        *,
+        channel: str | None = None,
+        chat_id: str | None = None,
+        media: list[str] | None = None,
+        plugin_context: list[str] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        **kwargs: list[str] | None,
+    ) -> tuple[str | None, list[dict[str, object]]] | None:
+        return None

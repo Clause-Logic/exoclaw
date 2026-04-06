@@ -486,7 +486,12 @@ class AgentLoop:
             sid = msg.session_key_override or f"{channel}:{chat_id}"
             structlog.contextvars.clear_contextvars()
             structlog.contextvars.bind_contextvars(
-                **{"session.key": sid, "channel": channel, "chat.id": chat_id, "sender.id": msg.sender_id}
+                **{
+                    "session.key": sid,
+                    "channel": channel,
+                    "chat.id": chat_id,
+                    "sender.id": msg.sender_id,
+                }
             )
             self._log.info("system_message")
             plugin_ctx = self._collect_plugin_context()
@@ -511,7 +516,12 @@ class AgentLoop:
 
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
-            **{"session.key": sid, "channel": msg.channel, "chat.id": msg.chat_id, "sender.id": msg.sender_id}
+            **{
+                "session.key": sid,
+                "channel": msg.channel,
+                "chat.id": msg.chat_id,
+                "sender.id": msg.sender_id,
+            }
         )
 
         self._log.info("message_receive", preview=preview)

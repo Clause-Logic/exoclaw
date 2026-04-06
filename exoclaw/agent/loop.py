@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from typing import cast
 
 import structlog
+import structlog.contextvars
 from structlog.typing import FilteringBoundLogger
 
 from exoclaw.agent.conversation import Conversation
@@ -482,8 +483,17 @@ class AgentLoop:
             channel, chat_id = (
                 msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
             )
-            self._log.info("system_message", **{"sender.id": msg.sender_id})
             sid = msg.session_key_override or f"{channel}:{chat_id}"
+            structlog.contextvars.clear_contextvars()
+            structlog.contextvars.bind_contextvars(
+                **{
+                    "session.key": sid,
+                    "channel": channel,
+                    "chat.id": chat_id,
+                    "sender.id": msg.sender_id,
+                }
+            )
+            self._log.info("system_message")
             plugin_ctx = self._collect_plugin_context()
             final_content, _ = await self.process_turn(
                 sid,
@@ -502,11 +512,19 @@ class AgentLoop:
             )
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
-        self._log.info(
-            "message_receive", channel=msg.channel, **{"sender.id": msg.sender_id}, preview=preview
+        sid = session_key or msg.session_key
+
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(
+            **{
+                "session.key": sid,
+                "channel": msg.channel,
+                "chat.id": msg.chat_id,
+                "sender.id": msg.sender_id,
+            }
         )
 
-        sid = session_key or msg.session_key
+        self._log.info("message_receive", preview=preview)
 
         # Slash commands
         cmd = msg.content.strip().lower()
@@ -583,9 +601,7 @@ class AgentLoop:
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
-        self._log.info(
-            "response_send", channel=msg.channel, **{"sender.id": msg.sender_id}, preview=preview
-        )
+        self._log.info("response_send", preview=preview)
         meta = dict(msg.metadata or {})
         meta.setdefault("session_key", sid)
         return OutboundMessage(

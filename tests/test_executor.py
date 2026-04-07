@@ -59,6 +59,42 @@ class TestDirectExecutorExecuteTool:
         registry.execute.assert_awaited_once_with("t", {}, None)
 
 
+class TestDirectExecutorMessageManagement:
+    def test_set_and_load(self) -> None:
+        executor = DirectExecutor()
+        msgs = [{"role": "user", "content": "hi"}]
+        executor.set_messages(msgs)
+        assert executor.load_messages() == msgs
+
+    def test_append_and_load(self) -> None:
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "user", "content": "hi"}])
+        executor.append_messages([{"role": "assistant", "content": "hello"}])
+        loaded = executor.load_messages()
+        assert len(loaded) == 2
+        assert loaded[0]["role"] == "user"
+        assert loaded[1]["role"] == "assistant"
+
+    def test_load_returns_copy(self) -> None:
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "user", "content": "hi"}])
+        loaded = executor.load_messages()
+        loaded.append({"role": "assistant", "content": "extra"})
+        assert len(executor.load_messages()) == 1
+
+    def test_set_replaces(self) -> None:
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "user", "content": "first"}])
+        executor.set_messages([{"role": "user", "content": "second"}])
+        loaded = executor.load_messages()
+        assert len(loaded) == 1
+        assert loaded[0]["content"] == "second"
+
+    def test_starts_empty(self) -> None:
+        executor = DirectExecutor()
+        assert executor.load_messages() == []
+
+
 class TestDirectExecutorBuildPrompt:
     async def test_delegates_to_conversation(self) -> None:
         executor = DirectExecutor()
@@ -83,6 +119,16 @@ class TestDirectExecutorBuildPrompt:
             media=None,
             plugin_context=None,
         )
+
+    async def test_build_prompt_seeds_messages(self) -> None:
+        executor = DirectExecutor()
+        conversation = MagicMock()
+        msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+        conversation.build_prompt = AsyncMock(return_value=msgs)
+
+        await executor.build_prompt(conversation, "s:1", "hi", channel="cli", chat_id="1")
+
+        assert executor.load_messages() == msgs
 
 
 class TestDirectExecutorRecord:
@@ -148,6 +194,7 @@ class TestCustomExecutorInLoop:
         conversation.record = AsyncMock()
 
         # Custom executor that records calls
+        _messages: list[dict[str, object]] = []
         executor = MagicMock(spec=DirectExecutor)
         response = MagicMock()
         response.has_tool_calls = False
@@ -159,6 +206,11 @@ class TestCustomExecutorInLoop:
         executor.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
         executor.record = AsyncMock()
         executor.run_turn = AsyncMock(return_value=None)
+        executor.set_messages = MagicMock(
+            side_effect=lambda m: _messages.clear() or _messages.extend(m)
+        )
+        executor.load_messages = MagicMock(side_effect=lambda: list(_messages))
+        executor.append_messages = MagicMock(side_effect=lambda m: _messages.extend(m))
 
         loop = AgentLoop(
             bus=bus,
@@ -217,6 +269,7 @@ class TestCustomExecutorInLoop:
         conversation = MagicMock()
 
         # Build an executor that returns tool calls on first chat, then final on second
+        _messages: list[dict[str, object]] = []
         executor = MagicMock(spec=DirectExecutor)
 
         tc = MagicMock()
@@ -243,6 +296,11 @@ class TestCustomExecutorInLoop:
         executor.record = AsyncMock()
         executor.execute_tool = AsyncMock(return_value="tool output")
         executor.run_turn = AsyncMock(return_value=None)
+        executor.set_messages = MagicMock(
+            side_effect=lambda m: _messages.clear() or _messages.extend(m)
+        )
+        executor.load_messages = MagicMock(side_effect=lambda: list(_messages))
+        executor.append_messages = MagicMock(side_effect=lambda m: _messages.extend(m))
 
         loop = AgentLoop(
             bus=bus,

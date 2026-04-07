@@ -173,7 +173,7 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict[str, object]]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
-        messages = initial_messages
+        self._executor.set_messages(initial_messages)
         iteration = 0
         final_content = None
         tools_used: list[str] = []
@@ -186,6 +186,7 @@ class AgentLoop:
                 if hasattr(self.conversation, "active_tools")
                 else None
             )
+            messages = self._executor.load_messages()
             try:
                 response = await self._executor.chat(
                     self.provider,
@@ -201,7 +202,7 @@ class AgentLoop:
                     compacted = await self._on_context_overflow(messages)
                     if compacted is not None:
                         self._log.info("context_compact", iteration=iteration)
-                        messages = compacted
+                        self._executor.set_messages(compacted)
                         continue
                 self._log.error("context_overflow", iteration=iteration)
                 final_content = (
@@ -237,7 +238,7 @@ class AgentLoop:
                     msg["reasoning_content"] = response.reasoning_content
                 if response.thinking_blocks:
                     msg["thinking_blocks"] = response.thinking_blocks
-                messages = [*messages, msg]
+                self._executor.append_messages([msg])
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
@@ -275,15 +276,16 @@ class AgentLoop:
                         )
                     if self._on_tool_result:
                         await self._executor.run_hook(self._on_tool_result, tool_call, result)
-                    messages = [
-                        *messages,
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": result,
-                        },
-                    ]
+                    self._executor.append_messages(
+                        [
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": result,
+                            },
+                        ]
+                    )
             else:
                 clean = self._strip_think(response.content)
                 if response.finish_reason == "error":
@@ -295,7 +297,7 @@ class AgentLoop:
                     msg2["reasoning_content"] = response.reasoning_content
                 if response.thinking_blocks:
                     msg2["thinking_blocks"] = response.thinking_blocks
-                messages = [*messages, msg2]
+                self._executor.append_messages([msg2])
                 final_content = clean
                 break
 
@@ -308,7 +310,7 @@ class AgentLoop:
                     self._on_max_iterations(ctx.session_key, ctx.channel, ctx.chat_id)
                 )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, self._executor.load_messages()
 
     async def process_turn(
         self,

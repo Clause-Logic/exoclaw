@@ -94,9 +94,33 @@ class Executor(Protocol):
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]] | None: ...
 
+    def append_messages(self, messages: list[dict[str, object]]) -> None:
+        """Append messages to the executor's backing store for this turn."""
+        ...
+
+    def load_messages(self) -> list[dict[str, object]]:
+        """Load the current message list for this turn."""
+        ...
+
+    def set_messages(self, messages: list[dict[str, object]]) -> None:
+        """Replace the current message list (e.g. after compaction)."""
+        ...
+
 
 class DirectExecutor:
     """Pass-through executor — calls everything inline."""
+
+    def __init__(self) -> None:
+        self._messages: list[dict[str, object]] = []
+
+    def append_messages(self, messages: list[dict[str, object]]) -> None:
+        self._messages.extend(messages)
+
+    def load_messages(self) -> list[dict[str, object]]:
+        return list(self._messages)
+
+    def set_messages(self, messages: list[dict[str, object]]) -> None:
+        self._messages = list(messages)
 
     async def chat(
         self,
@@ -141,7 +165,7 @@ class DirectExecutor:
         plugin_context: list[str] | None = None,
         **kwargs: list[str] | None,
     ) -> list[dict[str, object]]:
-        return await conversation.build_prompt(
+        messages = await conversation.build_prompt(
             session_id,
             message,
             channel=channel,
@@ -150,6 +174,8 @@ class DirectExecutor:
             plugin_context=plugin_context,
             **kwargs,
         )
+        self.set_messages(messages)
+        return messages
 
     async def record(
         self,

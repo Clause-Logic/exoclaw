@@ -174,7 +174,7 @@ class DirectExecutor:
             plugin_context=plugin_context,
             **kwargs,
         )
-        self._messages = list(messages)
+        self.set_messages(messages)
         return messages
 
     async def record(

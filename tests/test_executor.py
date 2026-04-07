@@ -206,7 +206,9 @@ class TestCustomExecutorInLoop:
         executor.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
         executor.record = AsyncMock()
         executor.run_turn = AsyncMock(return_value=None)
-        executor.set_messages = MagicMock(side_effect=lambda m: _messages.clear() or _messages.extend(m))
+        executor.set_messages = MagicMock(
+            side_effect=lambda m: _messages.clear() or _messages.extend(m)
+        )
         executor.load_messages = MagicMock(side_effect=lambda: list(_messages))
         executor.append_messages = MagicMock(side_effect=lambda m: _messages.extend(m))
 
@@ -294,7 +296,9 @@ class TestCustomExecutorInLoop:
         executor.record = AsyncMock()
         executor.execute_tool = AsyncMock(return_value="tool output")
         executor.run_turn = AsyncMock(return_value=None)
-        executor.set_messages = MagicMock(side_effect=lambda m: _messages.clear() or _messages.extend(m))
+        executor.set_messages = MagicMock(
+            side_effect=lambda m: _messages.clear() or _messages.extend(m)
+        )
         executor.load_messages = MagicMock(side_effect=lambda: list(_messages))
         executor.append_messages = MagicMock(side_effect=lambda m: _messages.extend(m))
 

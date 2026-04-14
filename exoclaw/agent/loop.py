@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import cast
 
@@ -243,21 +244,49 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    # `tool_call` + `tool_result` form a start/stop pair
+                    # correlated by `tool.call_id`. On error, `.exception()`
+                    # attaches the traceback via structlog's format_exc_info.
                     self._log.info(
-                        "tool_call", **{"tool.name": tool_call.name}, args=args_str[:200]
+                        "tool_call",
+                        **{
+                            "tool.name": tool_call.name,
+                            "tool.call_id": tool_call.id,
+                        },
+                        args=args_str[:200],
                     )
-                    if self._on_pre_tool:
-                        sk = self._current_ctx.session_key if self._current_ctx else ""
-                        rejection = await self._executor.run_hook(
-                            self._on_pre_tool, tool_call.name, tool_call.arguments, sk
-                        )
-                        if rejection:
-                            self._log.info(
-                                "tool_reject",
-                                **{"tool.name": tool_call.name},
-                                reason=str(rejection)[:100],
+                    t0 = time.monotonic()
+                    status = "ok"
+                    exc: BaseException | None = None
+                    result = ""
+                    try:
+                        if self._on_pre_tool:
+                            sk = self._current_ctx.session_key if self._current_ctx else ""
+                            rejection = await self._executor.run_hook(
+                                self._on_pre_tool,
+                                tool_call.name,
+                                tool_call.arguments,
+                                sk,
                             )
-                            result = str(rejection)
+                            if rejection:
+                                status = "rejected"
+                                self._log.info(
+                                    "tool_reject",
+                                    **{
+                                        "tool.name": tool_call.name,
+                                        "tool.call_id": tool_call.id,
+                                    },
+                                    reason=str(rejection)[:100],
+                                )
+                                result = str(rejection)
+                            else:
+                                result = await self._executor.execute_tool(
+                                    self.tools,
+                                    tool_call.name,
+                                    tool_call.arguments,
+                                    self._current_ctx,
+                                    tool_call_id=tool_call.id,
+                                )
                         else:
                             result = await self._executor.execute_tool(
                                 self.tools,
@@ -266,14 +295,25 @@ class AgentLoop:
                                 self._current_ctx,
                                 tool_call_id=tool_call.id,
                             )
-                    else:
-                        result = await self._executor.execute_tool(
-                            self.tools,
-                            tool_call.name,
-                            tool_call.arguments,
-                            self._current_ctx,
-                            tool_call_id=tool_call.id,
+                    except Exception as e:
+                        exc = e
+                        status = "error"
+                        result = (
+                            f"Error executing {tool_call.name}: {e}"
+                            "\n\n[Analyze the error above and try a different approach.]"
                         )
+                    finally:
+                        duration_ms = int((time.monotonic() - t0) * 1000)
+                        stop_kwargs: dict[str, object] = {
+                            "tool.name": tool_call.name,
+                            "tool.call_id": tool_call.id,
+                            "tool.status": status,
+                            "tool.duration_ms": duration_ms,
+                        }
+                        if exc is not None:
+                            self._log.exception("tool_result", **stop_kwargs)
+                        else:
+                            self._log.info("tool_result", **stop_kwargs)
                     if self._on_tool_result:
                         await self._executor.run_hook(self._on_tool_result, tool_call, result)
                     self._executor.append_messages(

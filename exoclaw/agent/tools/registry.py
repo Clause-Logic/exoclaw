@@ -83,10 +83,9 @@ class ToolRegistry:
         ctx is None.
 
         Exceptions raised by the tool propagate to the caller so the agent
-        loop can observe them as part of its tool span (see
-        ``AgentLoop._run_tool``). Domain errors (tool not found, invalid
-        parameters) are still returned as strings because they're normal
-        agent-visible outcomes, not unexpected failures.
+        loop can observe them as part of its tool span. Domain errors (tool
+        not found, invalid parameters) are still returned as strings because
+        they're normal agent-visible outcomes, not unexpected failures.
         """
         _hint = "\n\n[Analyze the error above and try a different approach.]"
 

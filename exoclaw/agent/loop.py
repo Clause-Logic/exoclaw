@@ -298,8 +298,12 @@ class AgentLoop:
                     except Exception as e:
                         exc = e
                         status = "error"
+                        # str(e) can be empty for bare exceptions (e.g. a
+                        # no-arg TypeError); fall back to the class name so
+                        # the LLM always sees something diagnostic.
+                        detail = str(e) or type(e).__name__
                         result = (
-                            f"Error executing {tool_call.name}: {e}"
+                            f"Error executing {tool_call.name}: {detail}"
                             "\n\n[Analyze the error above and try a different approach.]"
                         )
                     finally:
@@ -311,7 +315,11 @@ class AgentLoop:
                             "tool.duration_ms": duration_ms,
                         }
                         if exc is not None:
-                            self._log.exception("tool_result", **stop_kwargs)
+                            # Pass exc_info explicitly — by the time this
+                            # finally runs, sys.exc_info() has been cleared
+                            # by the except handler, so .exception() would
+                            # drop the traceback.
+                            self._log.error("tool_result", **stop_kwargs, exc_info=exc)
                         else:
                             self._log.info("tool_result", **stop_kwargs)
                     if self._on_tool_result:

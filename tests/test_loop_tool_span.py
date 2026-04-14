@@ -109,8 +109,52 @@ async def test_tool_result_logged_on_error_captures_exception() -> None:
 
     assert stop["tool.status"] == "error"
     assert stop["tool.call_id"] == "tc-42"
-    # structlog.testing.capture_logs records .exception() calls as level="error"
     assert stop["log_level"] == "error"
+    # exc_info must carry the actual exception instance (not True), since
+    # the stop event is emitted from a finally block where sys.exc_info()
+    # has already been cleared. Passing True would drop the traceback.
+    exc_info = stop["exc_info"]
+    assert isinstance(exc_info, RuntimeError)
+    assert str(exc_info) == "kaboom"
+
+
+async def test_tool_result_on_bare_exception_falls_back_to_type_name() -> None:
+    # Exceptions with empty str(e) (e.g. no-arg TypeError) would otherwise
+    # produce the useless "Error executing <tool>: " string this PR fixes.
+    class _BareError(Exception):
+        def __str__(self) -> str:
+            return ""
+
+    tool_response = _make_response(has_tool_calls=True)
+    tool_response.tool_calls = [_make_tool_call("my_tool", call_id="tc-42")]
+    final_response = _make_response(content="done")
+
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.chat = AsyncMock(side_effect=[tool_response, final_response])
+
+    conversation = MagicMock()
+    conversation.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
+    conversation.record = AsyncMock()
+
+    captured: list[str] = []
+
+    async def on_tool_result(tc: object, result: str) -> None:
+        captured.append(result)
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        conversation=conversation,
+        tools=[_tool(AsyncMock(side_effect=_BareError()))],
+        on_tool_result=on_tool_result,
+    )
+
+    msg = InboundMessage(channel="cli", sender_id="u", chat_id="main", content="go")
+    await loop._process_message(msg)
+
+    assert captured, "on_tool_result hook should have received the error string"
+    assert "_BareError" in captured[0]
 
 
 async def test_tool_exception_does_not_crash_loop() -> None:

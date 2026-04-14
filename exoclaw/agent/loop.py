@@ -463,8 +463,12 @@ class AgentLoop:
         for t in tasks:
             try:
                 await t
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                self._log.exception(
+                    "task_cancel_error", **{"session.key": msg.session_key}
+                )
         sub_cancelled = 0
         for tool in self.tools._tools.values():
             if hasattr(tool, "cancel_by_session"):

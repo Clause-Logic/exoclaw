@@ -99,9 +99,7 @@ class ToolRegistry:
         if hasattr(tool, "validate_params"):
             errors: list[str] = getattr(tool, "validate_params")(params)
             if errors:
-                return (
-                    f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
-                )
+                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
         if ctx is not None and hasattr(tool, "execute_with_context"):
             result: str = await getattr(tool, "execute_with_context")(ctx, **params)
         else:

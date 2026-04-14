@@ -41,8 +41,8 @@ class ChannelManager:
     async def _start_channel(self, name: str, channel: Channel) -> None:
         try:
             await channel.start(self.bus)
-        except Exception as e:
-            self._log.error("channel_start_error", channel=name, error=str(e))
+        except Exception:
+            self._log.exception("channel_start_error", channel=name)
 
     async def start_all(self) -> None:
         if not self.channels:
@@ -70,8 +70,8 @@ class ChannelManager:
         for name, channel in self.channels.items():
             try:
                 await channel.stop()
-            except Exception as e:
-                self._log.error("channel_stop_error", channel=name, error=str(e))
+            except Exception:
+                self._log.exception("channel_stop_error", channel=name)
 
     async def _dispatch_outbound(self) -> None:
 
@@ -89,8 +89,8 @@ class ChannelManager:
                 if channel:
                     try:
                         await channel.send(msg)
-                    except Exception as e:
-                        self._log.error("outbound_send_error", channel=msg.channel, error=str(e))
+                    except Exception:
+                        self._log.exception("outbound_send_error", channel=msg.channel)
                 else:
                     self._log.warning("unknown_channel", channel=msg.channel)
 

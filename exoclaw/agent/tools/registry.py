@@ -81,6 +81,11 @@ class ToolRegistry:
         If the tool implements execute_with_context(ctx, **kwargs), that is called
         instead of execute(**kwargs). Falls back to execute() if not implemented or
         ctx is None.
+
+        Exceptions raised by the tool propagate to the caller so the agent
+        loop can observe them as part of its tool span. Domain errors (tool
+        not found, invalid parameters) are still returned as strings because
+        they're normal agent-visible outcomes, not unexpected failures.
         """
         _hint = "\n\n[Analyze the error above and try a different approach.]"
 
@@ -88,24 +93,19 @@ class ToolRegistry:
         if not tool:
             return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
 
-        try:
-            if hasattr(tool, "cast_params"):
-                params = getattr(tool, "cast_params")(params)
-            if hasattr(tool, "validate_params"):
-                errors: list[str] = getattr(tool, "validate_params")(params)
-                if errors:
-                    return (
-                        f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
-                    )
-            if ctx is not None and hasattr(tool, "execute_with_context"):
-                result: str = await getattr(tool, "execute_with_context")(ctx, **params)
-            else:
-                result = await tool.execute(**params)
-            if isinstance(result, str) and result.startswith("Error"):
-                return result + _hint
-            return result
-        except Exception as e:
-            return f"Error executing {name}: {str(e)}" + _hint
+        if hasattr(tool, "cast_params"):
+            params = getattr(tool, "cast_params")(params)
+        if hasattr(tool, "validate_params"):
+            errors: list[str] = getattr(tool, "validate_params")(params)
+            if errors:
+                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
+        if ctx is not None and hasattr(tool, "execute_with_context"):
+            result: str = await getattr(tool, "execute_with_context")(ctx, **params)
+        else:
+            result = await tool.execute(**params)
+        if isinstance(result, str) and result.startswith("Error"):
+            return result + _hint
+        return result
 
     @property
     def tool_names(self) -> list[str]:

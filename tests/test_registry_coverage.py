@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from exoclaw.agent.tools.registry import ToolRegistry
 
 
@@ -73,14 +75,16 @@ class TestToolRegistryExecute:
         result = await reg.execute("search", {"q": "test"})
         assert result == "results"
 
-    async def test_execute_tool_raises_exception(self) -> None:
+    async def test_execute_tool_raises_exception_propagates(self) -> None:
+        # Tool exceptions propagate so AgentLoop can observe them on its
+        # tool span. Domain errors (not-found, invalid params) still return
+        # strings because they're normal agent-visible outcomes.
         reg = ToolRegistry()
         tool = _make_tool("broken")
         tool.execute = AsyncMock(side_effect=RuntimeError("something went wrong"))
         reg.register(tool)
-        result = await reg.execute("broken", {})
-        assert "Error" in result
-        assert "something went wrong" in result
+        with pytest.raises(RuntimeError, match="something went wrong"):
+            await reg.execute("broken", {})
 
     async def test_execute_returns_error_string_appends_hint(self) -> None:
         reg = ToolRegistry()

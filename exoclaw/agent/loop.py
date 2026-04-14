@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import cast
 
@@ -243,21 +244,49 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    # `tool_call` + `tool_result` form a start/stop pair
+                    # correlated by `tool.call_id`. On error, `.exception()`
+                    # attaches the traceback via structlog's format_exc_info.
                     self._log.info(
-                        "tool_call", **{"tool.name": tool_call.name}, args=args_str[:200]
+                        "tool_call",
+                        **{
+                            "tool.name": tool_call.name,
+                            "tool.call_id": tool_call.id,
+                        },
+                        args=args_str[:200],
                     )
-                    if self._on_pre_tool:
-                        sk = self._current_ctx.session_key if self._current_ctx else ""
-                        rejection = await self._executor.run_hook(
-                            self._on_pre_tool, tool_call.name, tool_call.arguments, sk
-                        )
-                        if rejection:
-                            self._log.info(
-                                "tool_reject",
-                                **{"tool.name": tool_call.name},
-                                reason=str(rejection)[:100],
+                    t0 = time.monotonic()
+                    status = "ok"
+                    exc: BaseException | None = None
+                    result = ""
+                    try:
+                        if self._on_pre_tool:
+                            sk = self._current_ctx.session_key if self._current_ctx else ""
+                            rejection = await self._executor.run_hook(
+                                self._on_pre_tool,
+                                tool_call.name,
+                                tool_call.arguments,
+                                sk,
                             )
-                            result = str(rejection)
+                            if rejection:
+                                status = "rejected"
+                                self._log.info(
+                                    "tool_reject",
+                                    **{
+                                        "tool.name": tool_call.name,
+                                        "tool.call_id": tool_call.id,
+                                    },
+                                    reason=str(rejection)[:100],
+                                )
+                                result = str(rejection)
+                            else:
+                                result = await self._executor.execute_tool(
+                                    self.tools,
+                                    tool_call.name,
+                                    tool_call.arguments,
+                                    self._current_ctx,
+                                    tool_call_id=tool_call.id,
+                                )
                         else:
                             result = await self._executor.execute_tool(
                                 self.tools,
@@ -266,14 +295,33 @@ class AgentLoop:
                                 self._current_ctx,
                                 tool_call_id=tool_call.id,
                             )
-                    else:
-                        result = await self._executor.execute_tool(
-                            self.tools,
-                            tool_call.name,
-                            tool_call.arguments,
-                            self._current_ctx,
-                            tool_call_id=tool_call.id,
+                    except Exception as e:
+                        exc = e
+                        status = "error"
+                        # str(e) can be empty for bare exceptions (e.g. a
+                        # no-arg TypeError); fall back to the class name so
+                        # the LLM always sees something diagnostic.
+                        detail = str(e) or type(e).__name__
+                        result = (
+                            f"Error executing {tool_call.name}: {detail}"
+                            "\n\n[Analyze the error above and try a different approach.]"
                         )
+                    finally:
+                        duration_ms = int((time.monotonic() - t0) * 1000)
+                        stop_kwargs: dict[str, object] = {
+                            "tool.name": tool_call.name,
+                            "tool.call_id": tool_call.id,
+                            "tool.status": status,
+                            "tool.duration_ms": duration_ms,
+                        }
+                        if exc is not None:
+                            # Pass exc_info explicitly — by the time this
+                            # finally runs, sys.exc_info() has been cleared
+                            # by the except handler, so .exception() would
+                            # drop the traceback.
+                            self._log.error("tool_result", **stop_kwargs, exc_info=exc)
+                        else:
+                            self._log.info("tool_result", **stop_kwargs)
                     if self._on_tool_result:
                         await self._executor.run_hook(self._on_tool_result, tool_call, result)
                     self._executor.append_messages(
@@ -423,8 +471,10 @@ class AgentLoop:
         for t in tasks:
             try:
                 await t
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                self._log.exception("task_cancel_error", **{"session.key": msg.session_key})
         sub_cancelled = 0
         for tool in self.tools._tools.values():
             if hasattr(tool, "cancel_by_session"):

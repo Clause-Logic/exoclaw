@@ -7,6 +7,8 @@ retry strategies, or execution environments).
 
 from __future__ import annotations
 
+import secrets
+import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -18,6 +20,31 @@ from exoclaw.providers.types import LLMResponse
 
 if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
+
+
+def _uuid7() -> str:
+    """Inline uuidv7 generator.
+
+    Python 3.14 will ship ``uuid.uuid7()`` in stdlib, but exoclaw
+    supports 3.11+. This is a minimal RFC 9562-compliant implementation
+    — no external dependency, ~20 lines. v7 is time-ordered, so log
+    lines sort chronologically when sorted by ``turn.id``.
+    """
+    ts_ms = time.time_ns() // 1_000_000
+    rand = secrets.token_bytes(10)
+    b = bytearray(16)
+    b[0] = (ts_ms >> 40) & 0xFF
+    b[1] = (ts_ms >> 32) & 0xFF
+    b[2] = (ts_ms >> 24) & 0xFF
+    b[3] = (ts_ms >> 16) & 0xFF
+    b[4] = (ts_ms >> 8) & 0xFF
+    b[5] = ts_ms & 0xFF
+    b[6] = 0x70 | (rand[0] & 0x0F)  # version 7 in high nibble
+    b[7] = rand[1]
+    b[8] = 0x80 | (rand[2] & 0x3F)  # variant 10
+    b[9:16] = rand[3:10]
+    hx = b.hex()
+    return f"{hx[0:8]}-{hx[8:12]}-{hx[12:16]}-{hx[16:20]}-{hx[20:32]}"
 
 
 @runtime_checkable
@@ -104,6 +131,23 @@ class Executor(Protocol):
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
         """Replace the current message list (e.g. after compaction)."""
+        ...
+
+    async def mint_turn_id(self) -> str:
+        """Produce a replay-safe unique id for one turn.
+
+        Called once at the top of each ``AgentLoop._process_turn_inline``
+        call. The returned id is bound into structlog's contextvars as
+        ``turn.id`` and every downstream log line inherits it, giving
+        callers a single-query way to trace everything that happened
+        during the turn.
+
+        Durable executors (DBOS, Temporal) must wrap a non-deterministic
+        source in whatever their framework provides for replay-safe
+        side-effects so the same id is returned on workflow recovery.
+        ``DirectExecutor`` just calls ``_uuid7()`` inline — there's no
+        replay boundary to worry about.
+        """
         ...
 
 
@@ -200,6 +244,9 @@ class DirectExecutor:
         **kwargs: object,
     ) -> object:
         return await fn(*args, **kwargs)
+
+    async def mint_turn_id(self) -> str:
+        return _uuid7()
 
     async def run_turn(
         self,

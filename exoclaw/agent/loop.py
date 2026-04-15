@@ -597,7 +597,16 @@ class AgentLoop:
                 msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
             )
             sid = msg.session_key_override or f"{channel}:{chat_id}"
-            structlog.contextvars.clear_contextvars()
+            # Rebind only the session-level fields we own — do NOT
+            # clear_contextvars. A caller several frames up may have
+            # seeded a ``turn.*`` trace context (e.g.
+            # ``SubagentManager._run`` threading parent ancestry into
+            # a child ``process_direct`` call) and wiping the whole
+            # contextvar store would break cross-spawn trace
+            # correlation without anyone noticing — the subagent's
+            # ``_process_turn_inline`` would see an empty context and
+            # start a fresh root. Rebinding the four keys here is
+            # idempotent and leaves other bindings alone.
             structlog.contextvars.bind_contextvars(
                 **{
                     "session.key": sid,
@@ -627,7 +636,11 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         sid = session_key or msg.session_key
 
-        structlog.contextvars.clear_contextvars()
+        # Rebind session-level fields only — see the comment above in
+        # the system-message branch. Preserving outer ``turn.*``
+        # contextvars is what makes subagent trace ancestry survive
+        # from ``SubagentManager._run`` into the child's own
+        # ``_process_turn_inline``.
         structlog.contextvars.bind_contextvars(
             **{
                 "session.key": sid,

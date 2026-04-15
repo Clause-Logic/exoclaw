@@ -285,3 +285,134 @@ class TestTurnContextBinding:
                 f"nested inner returned: got {restored.get(key)!r}, "
                 f"expected {outer.get(key)!r}"
             )
+
+
+class TestProcessMessagePreservesOuterTurnContext:
+    """``_process_message`` must not wipe a pre-bound ``turn.*``
+    context when it rebinds its session-level fields.
+
+    This is the load-bearing invariant for stage-3 subagent trace
+    propagation: ``SubagentManager._run`` binds ``turn.chain`` /
+    ``turn.id`` / ``turn.root_id`` from the parent workflow
+    arguments BEFORE calling ``loop.process_direct``. If
+    ``_process_message`` internally called ``clear_contextvars()``,
+    those bindings would be wiped before the child's
+    ``_process_turn_inline`` read them — the child would see an
+    empty context, mint a fresh root, and the subagent's log lines
+    would drop out of the parent's ``turn.root_id`` query.
+
+    Caught in production during the first deploy after stage 3
+    landed: every ``depth=0`` turn in cli:direct sessions, zero
+    ``depth>0`` turns observed.
+    """
+
+    async def test_outer_turn_chain_survives_process_message(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from exoclaw.bus.events import InboundMessage
+
+        executor = DirectExecutor()
+        loop = _make_loop(executor)
+
+        inside_turn: dict[str, object] = {}
+
+        async def capture_inside_loop(
+            _initial: list[dict[str, object]], on_progress: object = None
+        ) -> tuple[str, list[str], list[dict[str, object]]]:
+            inside_turn.update(structlog.contextvars.get_contextvars())
+            return ("response", [], [{"role": "system", "content": "ctx"}])
+
+        loop._run_agent_loop = capture_inside_loop  # type: ignore[method-assign]
+        loop._collect_plugin_context = lambda: []  # type: ignore[method-assign,assignment]
+
+        # Mock bus.publish_outbound to accept the OutboundMessage
+        loop.bus.publish_outbound = AsyncMock()  # type: ignore[method-assign]
+
+        msg = InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct",
+            content="hello",
+        )
+
+        # Simulate what SubagentManager._run does just before calling
+        # loop.process_direct: seed the contextvars with parent ancestry
+        # that should survive into the child's turn.
+        structlog.contextvars.clear_contextvars()
+        try:
+            structlog.contextvars.bind_contextvars(
+                **{
+                    "turn.chain": "rootA:parentB",
+                    "turn.id": "parentB",
+                    "turn.root_id": "rootA",
+                }
+            )
+            await loop._process_message(msg)
+        finally:
+            structlog.contextvars.clear_contextvars()
+
+        # The inner (child) turn's ``_process_turn_inline`` should
+        # have extended the outer chain, not started fresh. The seeded
+        # parent chain ``rootA:parentB`` is already 2 segments deep
+        # (root at depth 0, parentB at depth 1), so the new turn this
+        # ``process_direct`` call creates is the grandchild at depth 2.
+        assert inside_turn.get("turn.root_id") == "rootA", (
+            f"child turn started a fresh root instead of inheriting "
+            f"'rootA' — got {inside_turn.get('turn.root_id')!r}. "
+            f"_process_message is wiping parent contextvars."
+        )
+        assert inside_turn.get("turn.parent_id") == "parentB"
+        assert inside_turn.get("turn.depth") == 2
+        chain = inside_turn.get("turn.chain", "")
+        assert isinstance(chain, str)
+        assert chain.startswith("rootA:parentB:"), (
+            f"child chain must extend the outer, got {chain!r}"
+        )
+
+    async def test_system_message_preserves_outer_turn_chain(self) -> None:
+        """Same invariant for the ``channel == "system"`` branch of
+        ``_process_message`` — subagent result announcements from
+        ``SubagentManager._announce_*`` flow through this path.
+        """
+        from unittest.mock import AsyncMock
+
+        from exoclaw.bus.events import InboundMessage
+
+        executor = DirectExecutor()
+        loop = _make_loop(executor)
+
+        inside_turn: dict[str, object] = {}
+
+        async def capture_inside_loop(
+            _initial: list[dict[str, object]], on_progress: object = None
+        ) -> tuple[str, list[str], list[dict[str, object]]]:
+            inside_turn.update(structlog.contextvars.get_contextvars())
+            return ("response", [], [{"role": "system", "content": "ctx"}])
+
+        loop._run_agent_loop = capture_inside_loop  # type: ignore[method-assign]
+        loop._collect_plugin_context = lambda: []  # type: ignore[method-assign,assignment]
+        loop.bus.publish_outbound = AsyncMock()  # type: ignore[method-assign]
+
+        msg = InboundMessage(
+            channel="system",
+            sender_id="subagent",
+            chat_id="cli:direct",
+            content="[Subagent 'child' completed]",
+        )
+
+        structlog.contextvars.clear_contextvars()
+        try:
+            structlog.contextvars.bind_contextvars(
+                **{
+                    "turn.chain": "rootA:parentB",
+                    "turn.id": "parentB",
+                    "turn.root_id": "rootA",
+                }
+            )
+            await loop._process_message(msg)
+        finally:
+            structlog.contextvars.clear_contextvars()
+
+        assert inside_turn.get("turn.root_id") == "rootA"
+        assert inside_turn.get("turn.parent_id") == "parentB"
+        assert inside_turn.get("turn.depth") == 2

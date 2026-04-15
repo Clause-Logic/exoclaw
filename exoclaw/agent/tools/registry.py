@@ -1,6 +1,25 @@
 """Tool registry for dynamic tool management."""
 
+from __future__ import annotations
+
+import contextvars
+
 from exoclaw.agent.tools.protocol import Tool, ToolContext
+
+# ContextVar that carries the *currently-dispatching* ToolRegistry across
+# ``ToolRegistry.execute`` and whatever tool body it invokes. Tools that
+# need to look up sibling tools (``BatchTool``, ``ReduceTool``,
+# fan-out/fan-in patterns) should read this via
+# :meth:`ToolRegistry.current` instead of holding a stored reference via
+# ``set_registry()``: the stored-reference pattern breaks when a single
+# tool instance is shared across multiple ``AgentLoop``s — each loop's
+# constructor overwrites the pointer, so the main agent's tool ends up
+# pointing at the last-constructed subagent's registry. Per-asyncio-task
+# ContextVar isolation fixes that because concurrent dispatches from
+# different loops each see their own registry.
+_dispatch_registry: contextvars.ContextVar["ToolRegistry | None"] = contextvars.ContextVar(
+    "exoclaw.tool_registry.dispatch", default=None
+)
 
 
 class ToolRegistry:
@@ -86,6 +105,13 @@ class ToolRegistry:
         loop can observe them as part of its tool span. Domain errors (tool
         not found, invalid parameters) are still returned as strings because
         they're normal agent-visible outcomes, not unexpected failures.
+
+        Binds ``self`` into the ``_dispatch_registry`` ContextVar for the
+        duration of the tool body so fan-out tools can look up sibling
+        tools via :meth:`ToolRegistry.current`. The binding is restored
+        on exit — nested dispatches (a tool that calls back into the
+        registry) compose correctly because each execute() frame saves
+        and restores the previous value.
         """
         _hint = "\n\n[Analyze the error above and try a different approach.]"
 
@@ -99,13 +125,37 @@ class ToolRegistry:
             errors: list[str] = getattr(tool, "validate_params")(params)
             if errors:
                 return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
-        if ctx is not None and hasattr(tool, "execute_with_context"):
-            result: str = await getattr(tool, "execute_with_context")(ctx, **params)
-        else:
-            result = await tool.execute(**params)
+
+        token = _dispatch_registry.set(self)
+        try:
+            if ctx is not None and hasattr(tool, "execute_with_context"):
+                result: str = await getattr(tool, "execute_with_context")(ctx, **params)
+            else:
+                result = await tool.execute(**params)
+        finally:
+            _dispatch_registry.reset(token)
+
         if isinstance(result, str) and result.startswith("Error"):
             return result + _hint
         return result
+
+    @classmethod
+    def current(cls) -> "ToolRegistry | None":
+        """Return the registry currently dispatching a tool on this task.
+
+        Set automatically by :meth:`execute` for the duration of the
+        tool body. Fan-out tools like ``BatchTool`` and ``ReduceTool``
+        should prefer this over a stored reference from ``set_registry``
+        because a single tool instance can be wired into multiple
+        ``AgentLoop``s (each with its own registry) — the stored
+        reference is last-write-wins, but the ContextVar is
+        per-asyncio-task so concurrent dispatches never clobber each
+        other.
+
+        Returns ``None`` when no dispatch is in progress (e.g. the
+        caller invokes a tool body directly, bypassing the registry).
+        """
+        return _dispatch_registry.get()
 
     @property
     def tool_names(self) -> list[str]:

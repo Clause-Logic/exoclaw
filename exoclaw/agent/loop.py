@@ -416,21 +416,82 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]]:
-        """The actual turn logic — called directly or from a durable wrapper."""
-        initial = await self._executor.build_prompt(
-            self.conversation,
-            session_id,
-            message,
-            channel=channel,
-            chat_id=chat_id,
-            media=media,
-            plugin_context=plugin_context,
-            **kwargs,
+        """The actual turn logic — called directly or from a durable wrapper.
+
+        Binds a per-turn trace context into structlog contextvars so every
+        log line emitted during the turn (LLM requests, tool calls, tool
+        results, subagent spawns, etc.) carries ``turn.id``,
+        ``turn.root_id``, ``turn.parent_id``, ``turn.depth`` and
+        ``turn.chain``. That lets a single LogsQL query surface the full
+        causal tree of a user message without joins or timestamp
+        correlation.
+
+        The fields are read from existing contextvars before binding, so
+        nested ``_process_turn_inline`` calls (subagent chains that
+        inherit the parent's chain via a workflow argument and re-bind
+        before calling ``process_direct``) extend the ancestry correctly.
+        """
+        turn_id = await self._executor.mint_turn_id()
+        ctx = structlog.contextvars.get_contextvars()
+        parent_chain = cast(str, ctx.get("turn.chain", "") or "")
+        parent_id = ctx.get("turn.id")
+        root_id = ctx.get("turn.root_id") or turn_id
+        chain = f"{parent_chain}:{turn_id}" if parent_chain else turn_id
+        depth = parent_chain.count(":") + 1 if parent_chain else 0
+
+        # Save any existing ``turn.*`` values so a nested call can restore
+        # the outer turn's context instead of unbinding it entirely —
+        # otherwise the outer turn's subsequent logs (including
+        # ``turn_end``) would fire with no trace context bound.
+        _turn_keys = (
+            "turn.id",
+            "turn.root_id",
+            "turn.parent_id",
+            "turn.depth",
+            "turn.chain",
         )
-        final_content, _, all_msgs = await self._run_agent_loop(initial, on_progress=on_progress)
-        new_msgs = all_msgs[len(initial) - 1 :]
-        await self._executor.record(self.conversation, session_id, new_msgs)
-        return final_content, new_msgs
+        _sentinel = object()
+        prior_turn_ctx = {k: ctx.get(k, _sentinel) for k in _turn_keys}
+
+        structlog.contextvars.bind_contextvars(
+            **{
+                "turn.id": turn_id,
+                "turn.root_id": root_id,
+                "turn.parent_id": parent_id,
+                "turn.depth": depth,
+                "turn.chain": chain,
+            }
+        )
+        turn_start = time.monotonic()
+        self._log.info("turn_start")
+        try:
+            initial = await self._executor.build_prompt(
+                self.conversation,
+                session_id,
+                message,
+                channel=channel,
+                chat_id=chat_id,
+                media=media,
+                plugin_context=plugin_context,
+                **kwargs,
+            )
+            final_content, _, all_msgs = await self._run_agent_loop(
+                initial, on_progress=on_progress
+            )
+            new_msgs = all_msgs[len(initial) - 1 :]
+            await self._executor.record(self.conversation, session_id, new_msgs)
+            return final_content, new_msgs
+        finally:
+            self._log.info(
+                "turn_end",
+                **{"turn.duration_ms": int((time.monotonic() - turn_start) * 1000)},
+            )
+            to_rebind = {k: v for k, v in prior_turn_ctx.items() if v is not _sentinel}
+            to_unbind = tuple(k for k, v in prior_turn_ctx.items() if v is _sentinel)
+            if to_unbind:
+                structlog.contextvars.unbind_contextvars(*to_unbind)
+            if to_rebind:
+                structlog.contextvars.bind_contextvars(**to_rebind)
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""

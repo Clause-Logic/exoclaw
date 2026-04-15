@@ -249,6 +249,7 @@ class Executor(Protocol):
     async def clear(self, conversation, session_id) -> bool: ...
     async def run_hook(self, fn, /, *args, **kwargs) -> Any: ...
     async def run_turn(self, loop, session_id, message, **kwargs) -> tuple | None: ...
+    async def mint_turn_id(self) -> str: ...
 ```
 
 The `Executor` controls how the agent loop performs I/O. One method per operation, so each can have its own execution strategy.
@@ -270,6 +271,24 @@ This is how you run exoclaw in different execution environments (workflow engine
 **Plugin ideas:**
 - `exoclaw-executor-temporal` — run each operation as a Temporal activity with per-operation timeouts and retry policies
 - `exoclaw-executor-celery` — route tool execution through Celery workers
+
+#### Turn trace context
+
+Every call to `AgentLoop._process_turn_inline` mints a `turn.id` via `executor.mint_turn_id()` and binds a trace context into [structlog's contextvars](https://www.structlog.org/en/stable/contextvars.html) for the duration of the turn:
+
+| Field | Meaning |
+|---|---|
+| `turn.id` | This turn's unique id (uuidv7, time-ordered) |
+| `turn.root_id` | The originating turn — immutable across the whole subagent tree |
+| `turn.parent_id` | The direct parent turn, or `None` at the top |
+| `turn.depth` | `0` for a top-level turn, `1` for a subagent of a top-level, etc. |
+| `turn.chain` | Full ancestry as a `:`-joined string, e.g. `root:child:self` |
+
+Every downstream log line — LLM requests, tool calls, tool results, subagent spawns — inherits these fields automatically. That gives you one-query debugging: `turn.root_id:<uuid>` in your log backend surfaces every line from a single user message, including every downstream subagent turn, with no joins or timestamp correlation.
+
+Nested `_process_turn_inline` calls (the pattern a subagent uses when it re-enters the loop inside the same process) read the existing `turn.*` contextvars before binding, so the chain extends correctly instead of being wiped.
+
+Durable executors (DBOS, Temporal) implement `mint_turn_id` by wrapping a non-deterministic source in whatever their framework provides for replay-safe side-effects — `@DBOS.step()` for DBOS, `workflow.side_effect` for Temporal — so the same id is returned on workflow recovery. `DirectExecutor` has no replay boundary to worry about and just returns a fresh uuidv7 inline.
 
 ---
 

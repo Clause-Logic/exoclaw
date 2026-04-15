@@ -67,9 +67,7 @@ class TestUuid7:
             return u[:13]
 
         prefixes = [_ts_prefix(_uuid7()) for _ in range(50)]
-        assert prefixes == sorted(prefixes), (
-            f"timestamp prefixes regressed: {prefixes}"
-        )
+        assert prefixes == sorted(prefixes), f"timestamp prefixes regressed: {prefixes}"
 
 
 class TestDirectExecutorMintTurnId:
@@ -144,12 +142,8 @@ class TestTurnContextBinding:
         assert isinstance(turn_id, str)
         assert UUID(turn_id).version == 7
 
-        assert captured["turn.root_id"] == turn_id, (
-            "top-level turn must have root_id == turn_id"
-        )
-        assert captured["turn.parent_id"] is None, (
-            "top-level turn has no parent"
-        )
+        assert captured["turn.root_id"] == turn_id, "top-level turn must have root_id == turn_id"
+        assert captured["turn.parent_id"] is None, "top-level turn has no parent"
         assert captured["turn.depth"] == 0
         assert captured["turn.chain"] == turn_id
 

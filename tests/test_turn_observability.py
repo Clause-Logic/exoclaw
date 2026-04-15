@@ -19,6 +19,7 @@ joins or timestamp correlation.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -68,6 +69,31 @@ class TestUuid7:
 
         prefixes = [_ts_prefix(_uuid7()) for _ in range(50)]
         assert prefixes == sorted(prefixes), f"timestamp prefixes regressed: {prefixes}"
+
+    def test_survives_wall_clock_regression(self) -> None:
+        # NTP / VM-restore / leap seconds can push ``time.time_ns`` backwards.
+        # The generator must clamp against a per-process high-water mark
+        # so the id timestamp prefix still doesn't regress — otherwise
+        # log-sort-by-turn.id breaks for any trace that straddles a
+        # clock adjustment.
+        import exoclaw.executor as ex_mod
+
+        def _ts_prefix(u: str) -> str:
+            return u[:13]
+
+        before = _uuid7()
+
+        real_time_ns = time.time_ns
+        # Simulate wall clock jumping 10 seconds into the past.
+        try:
+            ex_mod.time.time_ns = lambda: real_time_ns() - 10_000_000_000  # type: ignore[attr-defined]
+            after = _uuid7()
+        finally:
+            ex_mod.time.time_ns = real_time_ns
+
+        assert _ts_prefix(before) <= _ts_prefix(after), (
+            f"uuidv7 prefix regressed after simulated clock jump: before={before} after={after}"
+        )
 
 
 class TestDirectExecutorMintTurnId:
@@ -209,6 +235,11 @@ class TestTurnContextBinding:
             seen["outer"] = dict(structlog.contextvars.get_contextvars())
             # Re-enter the loop as if a subagent is handling a nested turn.
             await inner_loop._process_turn_inline("s:2", "nested")
+            # Critical invariant: after the inner turn returns, the outer
+            # turn's trace context must still be bound. Otherwise any
+            # subsequent log line from the outer turn (including its own
+            # ``turn_end``) would emit with no turn fields at all.
+            seen["outer_after_inner"] = dict(structlog.contextvars.get_contextvars())
             return ("outer_resp", [], [{"role": "system", "content": "ctx"}])
 
         async def inner_body(
@@ -243,3 +274,14 @@ class TestTurnContextBinding:
         assert inner["turn.depth"] == 1
         assert inner["turn.chain"] == f"{outer['turn.chain']}:{inner['turn.id']}"
         assert inner["turn.id"] != outer["turn.id"]
+
+        # After the inner turn returns, the outer turn's context must
+        # be fully restored — every key back to the outer value, not
+        # unbound, not left pointing at the inner turn.
+        restored = seen["outer_after_inner"]
+        for key in ("turn.id", "turn.root_id", "turn.parent_id", "turn.depth", "turn.chain"):
+            assert restored.get(key) == outer.get(key), (
+                f"{key} was not restored to the outer turn's value after "
+                f"nested inner returned: got {restored.get(key)!r}, "
+                f"expected {outer.get(key)!r}"
+            )

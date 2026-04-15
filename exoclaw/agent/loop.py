@@ -439,6 +439,20 @@ class AgentLoop:
         chain = f"{parent_chain}:{turn_id}" if parent_chain else turn_id
         depth = parent_chain.count(":") + 1 if parent_chain else 0
 
+        # Save any existing ``turn.*`` values so a nested call can restore
+        # the outer turn's context instead of unbinding it entirely —
+        # otherwise the outer turn's subsequent logs (including
+        # ``turn_end``) would fire with no trace context bound.
+        _turn_keys = (
+            "turn.id",
+            "turn.root_id",
+            "turn.parent_id",
+            "turn.depth",
+            "turn.chain",
+        )
+        _sentinel = object()
+        prior_turn_ctx = {k: ctx.get(k, _sentinel) for k in _turn_keys}
+
         structlog.contextvars.bind_contextvars(
             **{
                 "turn.id": turn_id,
@@ -472,13 +486,12 @@ class AgentLoop:
                 "turn_end",
                 **{"turn.duration_ms": int((time.monotonic() - turn_start) * 1000)},
             )
-            structlog.contextvars.unbind_contextvars(
-                "turn.id",
-                "turn.root_id",
-                "turn.parent_id",
-                "turn.depth",
-                "turn.chain",
-            )
+            to_rebind = {k: v for k, v in prior_turn_ctx.items() if v is not _sentinel}
+            to_unbind = tuple(k for k, v in prior_turn_ctx.items() if v is _sentinel)
+            if to_unbind:
+                structlog.contextvars.unbind_contextvars(*to_unbind)
+            if to_rebind:
+                structlog.contextvars.bind_contextvars(**to_rebind)
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""

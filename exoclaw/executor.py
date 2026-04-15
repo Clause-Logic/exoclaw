@@ -8,6 +8,7 @@ retry strategies, or execution environments).
 from __future__ import annotations
 
 import secrets
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -22,6 +23,10 @@ if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
 
 
+_uuid7_lock = threading.Lock()
+_uuid7_last_ms = 0
+
+
 def _uuid7() -> str:
     """Inline uuidv7 generator.
 
@@ -29,8 +34,22 @@ def _uuid7() -> str:
     supports 3.11+. This is a minimal RFC 9562-compliant implementation
     — no external dependency, ~20 lines. v7 is time-ordered, so log
     lines sort chronologically when sorted by ``turn.id``.
+
+    The raw ``time.time_ns()`` wall clock can jump backwards under NTP
+    adjustments, VM restore, or leap seconds. A naive impl would then
+    emit ids whose timestamp prefix regresses, breaking the ordering
+    guarantee callers rely on. We clamp against a per-process
+    non-decreasing high-water mark inside a small critical section so
+    successive calls always see a non-decreasing ms value — even
+    during a clock regression, ids stay monotonic at the cost of
+    briefly "freezing" the stamped time until wall clock catches up.
     """
-    ts_ms = time.time_ns() // 1_000_000
+    global _uuid7_last_ms
+    with _uuid7_lock:
+        now_ms = time.time_ns() // 1_000_000
+        ts_ms = now_ms if now_ms > _uuid7_last_ms else _uuid7_last_ms
+        _uuid7_last_ms = ts_ms
+
     rand = secrets.token_bytes(10)
     b = bytearray(16)
     b[0] = (ts_ms >> 40) & 0xFF

@@ -538,6 +538,99 @@ class TestRunTurnDelegation:
 
 
 # ---------------------------------------------------------------------------
+# Executor-owned response send — publish_response / handles_response_send
+# ---------------------------------------------------------------------------
+
+
+class TestExecutorOwnsResponseSend:
+    async def test_process_message_returns_none_when_executor_owns_send(self) -> None:
+        """When the executor advertises ``handles_response_send=True`` and the
+        caller requests it via ``publish_response=True``, ``_process_message``
+        returns ``None`` so the caller knows the reply has already been
+        dispatched by the executor."""
+        from exoclaw.executor import DirectExecutor
+
+        class OwningExecutor(DirectExecutor):
+            handles_response_send: bool = True
+
+            async def run_turn(
+                self,
+                loop: object,
+                session_id: str,
+                message: str,
+                **kwargs: object,
+            ) -> tuple[str | None, list[dict[str, object]]] | None:
+                return ("final", [{"role": "assistant", "content": "final"}])
+
+        loop, _ = _make_loop(executor=OwningExecutor())
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="main", content="hi")
+
+        response = await loop._process_message(msg, publish_response=True)
+
+        assert response is None
+
+    async def test_process_message_returns_outbound_when_publish_response_false(self) -> None:
+        """When ``publish_response=False`` the caller is asking for the reply
+        content back (e.g. ``process_direct``). The executor's
+        ``handles_response_send`` is not consulted and the ``OutboundMessage``
+        is returned as normal."""
+        from exoclaw.executor import DirectExecutor
+
+        class OwningExecutor(DirectExecutor):
+            handles_response_send: bool = True
+
+            async def run_turn(
+                self,
+                loop: object,
+                session_id: str,
+                message: str,
+                **kwargs: object,
+            ) -> tuple[str | None, list[dict[str, object]]] | None:
+                return ("final", [{"role": "assistant", "content": "final"}])
+
+        loop, _ = _make_loop(executor=OwningExecutor())
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="main", content="hi")
+
+        response = await loop._process_message(msg, publish_response=False)
+
+        assert response is not None
+        assert response.content == "final"
+
+    async def test_publish_response_forwarded_to_executor_run_turn(self) -> None:
+        """``process_turn`` forwards ``publish_response`` to ``executor.run_turn``
+        so the executor knows whether the caller is asking it to own the send."""
+        from exoclaw.executor import DirectExecutor
+
+        captured: dict[str, object] = {}
+
+        class SpyExecutor(DirectExecutor):
+            async def run_turn(
+                self,
+                loop: object,
+                session_id: str,
+                message: str,
+                *,
+                publish_response: bool = False,
+                **kwargs: object,
+            ) -> tuple[str | None, list[dict[str, object]]] | None:
+                captured["publish_response"] = publish_response
+                return ("ok", [])
+
+        loop, _ = _make_loop(executor=SpyExecutor())
+
+        await loop.process_turn("sess1", "hi", publish_response=True)
+
+        assert captured["publish_response"] is True
+
+    async def test_direct_executor_handles_response_send_default_false(self) -> None:
+        """``DirectExecutor`` leaves the send to the caller — the core's
+        default behavior when no executor opts in."""
+        from exoclaw.executor import DirectExecutor
+
+        assert DirectExecutor.handles_response_send is False
+
+
+# ---------------------------------------------------------------------------
 # on_context_overflow — ContextWindowExceededError recovery
 # ---------------------------------------------------------------------------
 

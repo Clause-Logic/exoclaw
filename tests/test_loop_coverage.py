@@ -197,6 +197,50 @@ class TestRunAgentLoop:
         assert final == "hello"
         assert tools_used == []
 
+    async def test_model_override_reaches_provider(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
+        await loop._run_agent_loop([{"role": "user", "content": "hi"}], model="override-model")
+        assert loop.provider.chat.call_args.kwargs["model"] == "override-model"
+
+    async def test_no_override_falls_back_to_loop_default(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
+        await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+        assert loop.provider.chat.call_args.kwargs["model"] == loop.model
+
+    async def test_process_direct_passes_model_through(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
+        await loop.process_direct("hi", model="override-model")
+        assert loop.provider.chat.call_args.kwargs["model"] == "override-model"
+
+    async def test_inbound_message_model_override_used(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
+        msg = InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct",
+            content="hi",
+            model_override="from-channel",
+        )
+        await loop._process_message(msg)
+        assert loop.provider.chat.call_args.kwargs["model"] == "from-channel"
+
+    async def test_explicit_model_beats_msg_override(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
+        msg = InboundMessage(
+            channel="cli",
+            sender_id="user",
+            chat_id="direct",
+            content="hi",
+            model_override="from-channel",
+        )
+        await loop._process_message(msg, model="explicit")
+        assert loop.provider.chat.call_args.kwargs["model"] == "explicit"
+
     async def test_error_finish_reason(self) -> None:
         loop, _ = _make_loop()
         loop.provider.chat = AsyncMock(

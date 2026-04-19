@@ -16,6 +16,7 @@ class InboundMessage:
     media: list[str] = field(default_factory=list)  # Media URLs
     metadata: dict[str, object] = field(default_factory=dict)  # Channel-specific data
     session_key_override: str | None = None  # Optional override for thread-scoped sessions
+    model_override: str | None = None  # Optional per-turn model override (e.g. IPC route)
 
     @property
     def session_key(self) -> str:

@@ -130,7 +130,9 @@ def _make_loop(executor: DirectExecutor) -> AgentLoop:
         return [{"role": "system", "content": "ctx"}]
 
     async def fake_run_loop(
-        initial: list[dict[str, object]], on_progress: object = None
+        initial: list[dict[str, object]],
+        on_progress: object = None,
+        model: str | None = None,
     ) -> tuple[str, list[str], list[dict[str, object]]]:
         return ("response", [], list(initial))
 
@@ -148,7 +150,9 @@ class TestTurnContextBinding:
         captured: dict[str, object] = {}
 
         async def _capture_inside_turn(
-            _initial: list[dict[str, object]], on_progress: object = None
+            _initial: list[dict[str, object]],
+            on_progress: object = None,
+            model: str | None = None,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             captured.update(structlog.contextvars.get_contextvars())
             return ("response", [], [{"role": "system", "content": "ctx"}])
@@ -230,7 +234,9 @@ class TestTurnContextBinding:
         seen: dict[str, dict[str, object]] = {}
 
         async def outer_body(
-            _initial: list[dict[str, object]], on_progress: object = None
+            _initial: list[dict[str, object]],
+            on_progress: object = None,
+            model: str | None = None,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             seen["outer"] = dict(structlog.contextvars.get_contextvars())
             # Re-enter the loop as if a subagent is handling a nested turn.
@@ -243,7 +249,9 @@ class TestTurnContextBinding:
             return ("outer_resp", [], [{"role": "system", "content": "ctx"}])
 
         async def inner_body(
-            _initial: list[dict[str, object]], on_progress: object = None
+            _initial: list[dict[str, object]],
+            on_progress: object = None,
+            model: str | None = None,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             seen["inner"] = dict(structlog.contextvars.get_contextvars())
             return ("inner_resp", [], [{"role": "system", "content": "ctx"}])
@@ -317,7 +325,9 @@ class TestProcessMessagePreservesOuterTurnContext:
         inside_turn: dict[str, object] = {}
 
         async def capture_inside_loop(
-            _initial: list[dict[str, object]], on_progress: object = None
+            _initial: list[dict[str, object]],
+            on_progress: object = None,
+            model: str | None = None,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             inside_turn.update(structlog.contextvars.get_contextvars())
             return ("response", [], [{"role": "system", "content": "ctx"}])
@@ -384,7 +394,9 @@ class TestProcessMessagePreservesOuterTurnContext:
         inside_turn: dict[str, object] = {}
 
         async def capture_inside_loop(
-            _initial: list[dict[str, object]], on_progress: object = None
+            _initial: list[dict[str, object]],
+            on_progress: object = None,
+            model: str | None = None,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             inside_turn.update(structlog.contextvars.get_contextvars())
             return ("response", [], [{"role": "system", "content": "ctx"}])

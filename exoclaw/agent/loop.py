@@ -172,12 +172,14 @@ class AgentLoop:
         self,
         initial_messages: list[dict[str, object]],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        model: str | None = None,
     ) -> tuple[str | None, list[str], list[dict[str, object]]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         self._executor.set_messages(initial_messages)
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        effective_model = model or self.model
 
         while await self._should_continue(iteration, tools_used):
             iteration += 1
@@ -193,7 +195,7 @@ class AgentLoop:
                     self.provider,
                     messages=messages,
                     tools=self.tools.get_definitions(include=_include),
-                    model=self.model,
+                    model=effective_model,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                     reasoning_effort=self.reasoning_effort,
@@ -370,6 +372,7 @@ class AgentLoop:
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        model: str | None = None,
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]]:
         """Execute a single turn: build prompt, run agent loop, record.
@@ -377,6 +380,9 @@ class AgentLoop:
         If the executor provides a ``run_turn`` method the call is delegated
         to it, allowing durable executors (Temporal, DBOS) to wrap the turn
         in a workflow for crash recovery. Otherwise the turn runs inline.
+
+        ``model`` overrides ``self.model`` for this turn only; falls back to
+        the loop default when ``None``.
 
         Returns ``(final_content, new_messages)``.
         """
@@ -389,6 +395,7 @@ class AgentLoop:
             media=media,
             plugin_context=plugin_context,
             on_progress=on_progress,
+            model=model,
             **kwargs,
         )
         if result is not None:
@@ -401,6 +408,7 @@ class AgentLoop:
             media=media,
             plugin_context=plugin_context,
             on_progress=on_progress,
+            model=model,
             **kwargs,
         )
 
@@ -414,6 +422,7 @@ class AgentLoop:
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        model: str | None = None,
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]]:
         """The actual turn logic — called directly or from a durable wrapper.
@@ -476,7 +485,7 @@ class AgentLoop:
                 **kwargs,
             )
             final_content, _, all_msgs = await self._run_agent_loop(
-                initial, on_progress=on_progress
+                initial, on_progress=on_progress, model=model
             )
             new_msgs = all_msgs[len(initial) - 1 :]
             await self._executor.record(self.conversation, session_id, new_msgs)
@@ -588,6 +597,7 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None | object = _UNSET,
+        model: str | None = None,
         **kwargs: list[str] | None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
@@ -623,6 +633,7 @@ class AgentLoop:
                 channel=channel,
                 chat_id=chat_id,
                 plugin_context=plugin_ctx or None,
+                model=model or msg.model_override,
             )
             sys_meta = dict(msg.metadata or {})
             sys_meta.setdefault("session_key", sid)
@@ -715,6 +726,7 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             plugin_context=plugin_ctx or None,
             on_progress=effective_progress,
+            model=model or msg.model_override,
             **kwargs,
         )
 
@@ -744,9 +756,13 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        model: str | None = None,
         **kwargs: list[str] | None,
     ) -> str:
         """Process a message directly (for CLI or cron usage).
+
+        ``model`` overrides the loop's default model for this turn only; pass
+        ``None`` (the default) to inherit from the loop.
 
         Extra keyword arguments are forwarded to conversation.build_prompt,
         allowing callers to pass domain-specific context (e.g. skill_names,
@@ -754,6 +770,6 @@ class AgentLoop:
         """
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         response = await self._process_message(
-            msg, session_key=session_key, on_progress=on_progress, **kwargs
+            msg, session_key=session_key, on_progress=on_progress, model=model, **kwargs
         )
         return response.content if response else ""

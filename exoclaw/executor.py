@@ -137,6 +137,7 @@ class Executor(Protocol):
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        model: str | None = None,
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]] | None: ...
 
@@ -278,6 +279,7 @@ class DirectExecutor:
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        model: str | None = None,
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]] | None:
         return None

@@ -70,6 +70,15 @@ def _uuid7() -> str:
 class Executor(Protocol):
     """Pluggable execution layer for agent loop I/O."""
 
+    # When True, the executor takes responsibility for publishing the
+    # final turn reply to the bus itself and ``_process_message`` returns
+    # ``None`` instead of constructing an ``OutboundMessage`` for the
+    # caller to publish. Executors opt in when they have a more
+    # appropriate place to perform the send than the outer agent loop —
+    # the core doesn't care why. When False, ``_process_message`` builds
+    # the ``OutboundMessage`` and the caller handles the send.
+    handles_response_send: bool
+
     async def chat(
         self,
         provider: LLMProvider,
@@ -138,6 +147,7 @@ class Executor(Protocol):
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
+        publish_response: bool = False,
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]] | None: ...
 
@@ -173,6 +183,9 @@ class Executor(Protocol):
 
 class DirectExecutor:
     """Pass-through executor — calls everything inline."""
+
+    # Pass-through executor does not publish — leaves that to the caller.
+    handles_response_send: bool = False
 
     def __init__(self) -> None:
         self._messages: list[dict[str, object]] = []
@@ -280,6 +293,7 @@ class DirectExecutor:
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
+        publish_response: bool = False,
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]] | None:
         return None

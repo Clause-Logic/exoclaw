@@ -373,6 +373,7 @@ class AgentLoop:
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
+        publish_response: bool = False,
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]]:
         """Execute a single turn: build prompt, run agent loop, record.
@@ -396,6 +397,7 @@ class AgentLoop:
             plugin_context=plugin_context,
             on_progress=on_progress,
             model=model,
+            publish_response=publish_response,
             **kwargs,
         )
         if result is not None:
@@ -563,7 +565,11 @@ class AgentLoop:
         """Process a message under the global lock."""
         async with self._processing_lock:
             try:
-                response = await self._process_message(msg)
+                # Ask ``_process_message`` to let the executor own the
+                # publish if it advertises ``handles_response_send``.
+                # When it does, we get ``None`` back and skip the publish
+                # below; otherwise we publish the returned message as usual.
+                response = await self._process_message(msg, publish_response=True)
                 if response is not None:
                     await self.bus.publish_outbound(response)
                 elif msg.channel == "cli":
@@ -598,9 +604,18 @@ class AgentLoop:
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None | object = _UNSET,
         model: str | None = None,
+        publish_response: bool = False,
         **kwargs: list[str] | None,
     ) -> OutboundMessage | None:
-        """Process a single inbound message and return the response."""
+        """Process a single inbound message and return the response.
+
+        ``publish_response`` is forwarded to ``process_turn`` so executors
+        that advertise ``handles_response_send`` can take ownership of the
+        send. When both flags are True this method returns ``None`` —
+        callers read that as "reply already dispatched, nothing more to
+        do." Callers that need the reply content back (``process_direct``
+        for CLI, subagent chains, cron) pass ``publish_response=False``.
+        """
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (
@@ -634,7 +649,11 @@ class AgentLoop:
                 chat_id=chat_id,
                 plugin_context=plugin_ctx or None,
                 model=model or msg.model_override,
+                publish_response=publish_response,
             )
+            if publish_response and getattr(self._executor, "handles_response_send", False):
+                # Executor took ownership of the send — nothing to return.
+                return None
             sys_meta = dict(msg.metadata or {})
             sys_meta.setdefault("session_key", sid)
             return OutboundMessage(
@@ -727,6 +746,7 @@ class AgentLoop:
             plugin_context=plugin_ctx or None,
             on_progress=effective_progress,
             model=model or msg.model_override,
+            publish_response=publish_response,
             **kwargs,
         )
 
@@ -734,6 +754,10 @@ class AgentLoop:
             final_content = "I've completed processing but have no response to give."
         if self._on_post_turn and new_msgs:
             asyncio.ensure_future(self._on_post_turn(new_msgs, sid, msg.channel, msg.chat_id))
+
+        if publish_response and getattr(self._executor, "handles_response_send", False):
+            # Executor took ownership of the send — nothing to return.
+            return None
 
         if any(getattr(t, "sent_in_turn", False) for t in self.tools._tools.values()):
             return None
@@ -769,7 +793,14 @@ class AgentLoop:
         turn_context) without the loop needing to know about them.
         """
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
+        # Callers of ``process_direct`` read the returned content — they
+        # don't want the executor to publish on their behalf.
         response = await self._process_message(
-            msg, session_key=session_key, on_progress=on_progress, model=model, **kwargs
+            msg,
+            session_key=session_key,
+            on_progress=on_progress,
+            model=model,
+            publish_response=False,
+            **kwargs,
         )
         return response.content if response else ""

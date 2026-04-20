@@ -11,6 +11,7 @@ import secrets
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from exoclaw.agent.conversation import Conversation
@@ -21,6 +22,31 @@ from exoclaw.providers.types import LLMResponse
 
 if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
+
+
+# Per-turn message buffer. Backed by a ContextVar so concurrent turns
+# running through the same executor singleton (e.g. a cron firing while
+# an IPC turn is in flight, or two IPC turns in parallel) each see their
+# own list. asyncio.create_task() snapshots the current context, so each
+# turn's call chain starts with an independent binding.
+#
+# The executor is a process-wide singleton (wired once in app startup).
+# A plain instance attribute here was a silent concurrency bug: two
+# turns entering _run_agent_loop would share the same _messages list,
+# trampling each other's history, cross-contaminating LLM context, and
+# eventually writing each other's messages into the wrong session JSONL.
+_messages_var: ContextVar[list[dict[str, object]]] = ContextVar(
+    "exoclaw_executor_messages"
+)
+
+
+def _get_messages_buffer() -> list[dict[str, object]]:
+    try:
+        return _messages_var.get()
+    except LookupError:
+        buf: list[dict[str, object]] = []
+        _messages_var.set(buf)
+        return buf
 
 
 _uuid7_lock = threading.Lock()
@@ -188,16 +214,25 @@ class DirectExecutor:
     handles_response_send: bool = False
 
     def __init__(self) -> None:
-        self._messages: list[dict[str, object]] = []
+        # Reset the current task's buffer so a fresh executor starts empty.
+        # In production only one executor exists (wired at app startup), so
+        # this runs once. In tests it gives clean-slate semantics between
+        # executor instances without forcing a conftest fixture.
+        _messages_var.set([])
 
     def append_messages(self, messages: list[dict[str, object]]) -> None:
-        self._messages.extend(messages)
+        _get_messages_buffer().extend(messages)
 
     def load_messages(self) -> list[dict[str, object]]:
-        return list(self._messages)
+        return list(_get_messages_buffer())
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
-        self._messages = list(messages)
+        # Fresh list per call — this is load-bearing for concurrent turns:
+        # if we reused the prior list object and just cleared it in place,
+        # a peer task that had already captured a reference via
+        # ``load_messages()`` would observe the mutation. Binding a new
+        # list isolates each turn's view.
+        _messages_var.set(list(messages))
 
     async def chat(
         self,

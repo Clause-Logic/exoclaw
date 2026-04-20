@@ -94,6 +94,46 @@ class TestDirectExecutorMessageManagement:
         executor = DirectExecutor()
         assert executor.load_messages() == []
 
+    async def test_concurrent_turns_isolate_messages(self) -> None:
+        """The shared executor singleton must not leak messages across
+        concurrent turns.
+
+        Regression for the incident where a cron's ``Learn about
+        Stephen`` turn fired mid-flight and its messages ended up
+        pre-filling the context of a peer ``/agent/call`` turn, leading
+        the peer's LLM to hallucinate it was running the cron's skill
+        and cross-contaminating both session JSONLs.
+
+        Each asyncio.Task gets its own ContextVar binding, so both
+        turns must observe exactly the messages they themselves wrote.
+        """
+        import asyncio
+
+        executor = DirectExecutor()
+        entered = asyncio.Event()
+        proceed = asyncio.Event()
+
+        async def turn(label: str, out: dict[str, list[dict[str, object]]]) -> None:
+            executor.set_messages([{"role": "user", "content": f"{label}:user"}])
+            entered.set()
+            await proceed.wait()
+            executor.append_messages([{"role": "assistant", "content": f"{label}:asst"}])
+            out[label] = executor.load_messages()
+
+        results: dict[str, list[dict[str, object]]] = {}
+        t1 = asyncio.create_task(turn("a", results))
+        # Let t1 set its messages and suspend.
+        await entered.wait()
+        entered.clear()
+        t2 = asyncio.create_task(turn("b", results))
+        await entered.wait()
+        # Both tasks have now set distinct message lists; release them.
+        proceed.set()
+        await asyncio.gather(t1, t2)
+
+        assert [m["content"] for m in results["a"]] == ["a:user", "a:asst"]
+        assert [m["content"] for m in results["b"]] == ["b:user", "b:asst"]
+
 
 class TestDirectExecutorBuildPrompt:
     async def test_delegates_to_conversation(self) -> None:

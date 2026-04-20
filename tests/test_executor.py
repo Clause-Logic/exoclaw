@@ -94,6 +94,23 @@ class TestDirectExecutorMessageManagement:
         executor = DirectExecutor()
         assert executor.load_messages() == []
 
+    def test_two_instances_isolate_messages(self) -> None:
+        """Two executors in the same task must not share a buffer.
+
+        The ContextVar is per-instance for exactly this reason — a
+        module-level var would make a second executor reset the first's
+        state and vice versa.
+        """
+        a = DirectExecutor()
+        b = DirectExecutor()
+        a.set_messages([{"role": "user", "content": "a"}])
+        b.set_messages([{"role": "user", "content": "b"}])
+        assert [m["content"] for m in a.load_messages()] == ["a"]
+        assert [m["content"] for m in b.load_messages()] == ["b"]
+        a.append_messages([{"role": "assistant", "content": "a2"}])
+        assert [m["content"] for m in a.load_messages()] == ["a", "a2"]
+        assert [m["content"] for m in b.load_messages()] == ["b"]
+
     async def test_concurrent_turns_isolate_messages(self) -> None:
         """The shared executor singleton must not leak messages across
         concurrent turns.

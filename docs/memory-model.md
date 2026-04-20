@@ -57,7 +57,7 @@ Even with both stores in place, an in-flight turn holds meaningful RAM:
 Every iteration of `AgentLoop._run_agent_loop` does:
 
 ```python
-messages = self._executor.load_messages()          # copy of _messages
+messages = self._executor.load_messages()          # copy of the per-turn buffer
 response = await self._executor.chat(
     provider, messages=messages, ...
 )                                                  # json.dumps(messages)
@@ -67,12 +67,13 @@ response = await self._executor.chat(
 At the peak of each iteration there are **three concurrent copies** of
 the full turn-local history:
 
-- `self._executor._messages` — the accumulating authoritative buffer
+- the executor's per-turn message buffer (ContextVar-backed) — the
+  accumulating authoritative list
 - `messages = self._executor.load_messages()` — an explicit `list(...)`
   copy for this iteration
 - the JSON-serialized request body inside httpx
 
-And `_messages` *grows* — `append_messages([msg])` fires after every
+And the buffer *grows* — `append_messages([msg])` fires after every
 assistant message and every tool result. A turn with 10 iterations and
 a 50 KB tool result in the middle runs the buffer up to 500 KB–2 MB
 *before* you account for the doubling/tripling at the httpx call.

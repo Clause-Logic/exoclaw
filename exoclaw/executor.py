@@ -24,29 +24,6 @@ if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
 
 
-# Per-turn message buffer. Backed by a ContextVar so concurrent turns
-# running through the same executor singleton (e.g. a cron firing while
-# an IPC turn is in flight, or two IPC turns in parallel) each see their
-# own list. asyncio.create_task() snapshots the current context, so each
-# turn's call chain starts with an independent binding.
-#
-# The executor is a process-wide singleton (wired once in app startup).
-# A plain instance attribute here was a silent concurrency bug: two
-# turns entering _run_agent_loop would share the same _messages list,
-# trampling each other's history, cross-contaminating LLM context, and
-# eventually writing each other's messages into the wrong session JSONL.
-_messages_var: ContextVar[list[dict[str, object]]] = ContextVar("exoclaw_executor_messages")
-
-
-def _get_messages_buffer() -> list[dict[str, object]]:
-    try:
-        return _messages_var.get()
-    except LookupError:
-        buf: list[dict[str, object]] = []
-        _messages_var.set(buf)
-        return buf
-
-
 _uuid7_lock = threading.Lock()
 _uuid7_last_ms = 0
 
@@ -206,23 +183,49 @@ class Executor(Protocol):
 
 
 class DirectExecutor:
-    """Pass-through executor — calls everything inline."""
+    """Pass-through executor — calls everything inline.
+
+    The per-turn message buffer is backed by a ContextVar owned by each
+    executor instance. Concurrent turns running through the same executor
+    (e.g. a periodic background task firing while a user-initiated turn
+    is in flight) each see their own list: ``asyncio.create_task()``
+    snapshots the current context, so each turn's call chain starts with
+    an independent binding.
+
+    The ContextVar is per-instance rather than module-level so that two
+    ``DirectExecutor()`` objects constructed in the same task — unusual
+    in production (the executor is a singleton) but common in tests —
+    don't share state with each other.
+
+    A plain instance attribute here would be a silent concurrency bug:
+    two turns entering ``_run_agent_loop`` would share the same list,
+    trampling each other's history, cross-contaminating LLM context,
+    and eventually writing each other's messages into the wrong session.
+    """
 
     # Pass-through executor does not publish — leaves that to the caller.
     handles_response_send: bool = False
 
     def __init__(self) -> None:
-        # Reset the current task's buffer so a fresh executor starts empty.
-        # In production only one executor exists (wired at app startup), so
-        # this runs once. In tests it gives clean-slate semantics between
-        # executor instances without forcing a conftest fixture.
-        _messages_var.set([])
+        # Per-instance ContextVar: each executor has its own binding, and
+        # within a single executor each asyncio task has its own view.
+        self._messages_var: ContextVar[list[dict[str, object]]] = ContextVar(
+            f"exoclaw_executor_messages_{id(self)}"
+        )
+
+    def _get_buffer(self) -> list[dict[str, object]]:
+        try:
+            return self._messages_var.get()
+        except LookupError:
+            buf: list[dict[str, object]] = []
+            self._messages_var.set(buf)
+            return buf
 
     def append_messages(self, messages: list[dict[str, object]]) -> None:
-        _get_messages_buffer().extend(messages)
+        self._get_buffer().extend(messages)
 
     def load_messages(self) -> list[dict[str, object]]:
-        return list(_get_messages_buffer())
+        return list(self._get_buffer())
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
         # Fresh list per call — this is load-bearing for concurrent turns:
@@ -230,7 +233,7 @@ class DirectExecutor:
         # a peer task that had already captured a reference via
         # ``load_messages()`` would observe the mutation. Binding a new
         # list isolates each turn's view.
-        _messages_var.set(list(messages))
+        self._messages_var.set(list(messages))
 
     async def chat(
         self,

@@ -11,6 +11,7 @@ import secrets
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from exoclaw.agent.conversation import Conversation
@@ -182,22 +183,57 @@ class Executor(Protocol):
 
 
 class DirectExecutor:
-    """Pass-through executor — calls everything inline."""
+    """Pass-through executor — calls everything inline.
+
+    The per-turn message buffer is backed by a ContextVar owned by each
+    executor instance. Concurrent turns running through the same executor
+    (e.g. a periodic background task firing while a user-initiated turn
+    is in flight) each see their own list: ``asyncio.create_task()``
+    snapshots the current context, so each turn's call chain starts with
+    an independent binding.
+
+    The ContextVar is per-instance rather than module-level so that two
+    ``DirectExecutor()`` objects constructed in the same task — unusual
+    in production (the executor is a singleton) but common in tests —
+    don't share state with each other.
+
+    A plain instance attribute here would be a silent concurrency bug:
+    two turns entering ``_run_agent_loop`` would share the same list,
+    trampling each other's history, cross-contaminating LLM context,
+    and eventually writing each other's messages into the wrong session.
+    """
 
     # Pass-through executor does not publish — leaves that to the caller.
     handles_response_send: bool = False
 
     def __init__(self) -> None:
-        self._messages: list[dict[str, object]] = []
+        # Per-instance ContextVar: each executor has its own binding, and
+        # within a single executor each asyncio task has its own view.
+        self._messages_var: ContextVar[list[dict[str, object]]] = ContextVar(
+            f"exoclaw_executor_messages_{id(self)}"
+        )
+
+    def _get_buffer(self) -> list[dict[str, object]]:
+        try:
+            return self._messages_var.get()
+        except LookupError:
+            buf: list[dict[str, object]] = []
+            self._messages_var.set(buf)
+            return buf
 
     def append_messages(self, messages: list[dict[str, object]]) -> None:
-        self._messages.extend(messages)
+        self._get_buffer().extend(messages)
 
     def load_messages(self) -> list[dict[str, object]]:
-        return list(self._messages)
+        return list(self._get_buffer())
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
-        self._messages = list(messages)
+        # Fresh list per call — this is load-bearing for concurrent turns:
+        # if we reused the prior list object and just cleared it in place,
+        # a peer task that had already captured a reference via
+        # ``load_messages()`` would observe the mutation. Binding a new
+        # list isolates each turn's view.
+        self._messages_var.set(list(messages))
 
     async def chat(
         self,

@@ -35,9 +35,7 @@ if TYPE_CHECKING:
 # turns entering _run_agent_loop would share the same _messages list,
 # trampling each other's history, cross-contaminating LLM context, and
 # eventually writing each other's messages into the wrong session JSONL.
-_messages_var: ContextVar[list[dict[str, object]]] = ContextVar(
-    "exoclaw_executor_messages"
-)
+_messages_var: ContextVar[list[dict[str, object]]] = ContextVar("exoclaw_executor_messages")
 
 
 def _get_messages_buffer() -> list[dict[str, object]]:

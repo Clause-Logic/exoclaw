@@ -198,7 +198,10 @@ class AgentLoop:
         prefer_append = flush_sid is not None and _has_append(self.conversation)
 
         async def _flush(msg: dict[str, object]) -> None:
-            if prefer_append:
+            # ``prefer_append`` implies ``flush_sid`` is str (see the
+            # guard above); repeat the None check inline so the static
+            # type-checker can narrow without a cast.
+            if prefer_append and flush_sid is not None:
                 await self._executor.append_message(self.conversation, flush_sid, msg)
 
         while await self._should_continue(iteration, tools_used):

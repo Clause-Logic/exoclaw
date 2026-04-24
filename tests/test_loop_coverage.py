@@ -685,9 +685,7 @@ class TestPerMessagePersistence:
         provider = MagicMock()
         provider.get_default_model.return_value = "test-model"
         conversation = MagicMock()
-        conversation.build_prompt = AsyncMock(
-            return_value=[{"role": "user", "content": "hello"}]
-        )
+        conversation.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
         conversation.append = AsyncMock()
         conversation.post_turn = AsyncMock()
         conversation.record = AsyncMock()
@@ -700,7 +698,9 @@ class TestPerMessagePersistence:
         tool = MagicMock()
         tool.name = "t1"
         tool.sent_in_turn = False
-        tool.get_definition = MagicMock(return_value={"type": "function", "function": {"name": "t1"}})
+        tool.get_definition = MagicMock(
+            return_value={"type": "function", "function": {"name": "t1"}}
+        )
         tool.execute_with_context = AsyncMock(return_value="tool output")
         tool.execute = AsyncMock(return_value="tool output")
         loop.tools._tools["t1"] = tool
@@ -754,12 +754,12 @@ class TestPerMessagePersistence:
             def __init__(self) -> None:
                 self.recorded: list[list[dict[str, object]]] = []
 
-            async def build_prompt(self, session_id: str, message: str, **kw: object) -> list[dict[str, object]]:
+            async def build_prompt(
+                self, session_id: str, message: str, **kw: object
+            ) -> list[dict[str, object]]:
                 return [{"role": "user", "content": message}]
 
-            async def record(
-                self, session_id: str, new_messages: list[dict[str, object]]
-            ) -> None:
+            async def record(self, session_id: str, new_messages: list[dict[str, object]]) -> None:
                 self.recorded.append(new_messages)
 
             async def clear(self, session_id: str) -> bool:

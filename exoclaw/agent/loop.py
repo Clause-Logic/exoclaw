@@ -199,9 +199,7 @@ class AgentLoop:
 
         async def _flush(msg: dict[str, object]) -> None:
             if prefer_append:
-                await self._executor.append_message(
-                    self.conversation, flush_sid, msg
-                )
+                await self._executor.append_message(self.conversation, flush_sid, msg)
 
         while await self._should_continue(iteration, tools_used):
             iteration += 1
@@ -522,9 +520,7 @@ class AgentLoop:
                 # Persist the new user message before the loop runs so a
                 # crash mid-turn still has the user's input on disk.
                 if initial:
-                    await self._executor.append_message(
-                        self.conversation, session_id, initial[-1]
-                    )
+                    await self._executor.append_message(self.conversation, session_id, initial[-1])
             final_content, _, all_msgs = await self._run_agent_loop(
                 initial, on_progress=on_progress, model=model
             )

@@ -230,9 +230,7 @@ class TestDirectExecutorAppendMessage:
         conversation = MagicMock()  # append is a bare MagicMock, NOT AsyncMock
 
         # Must not raise. The existing mock test suite depends on this.
-        await executor.append_message(
-            conversation, "session:1", {"role": "user", "content": "x"}
-        )
+        await executor.append_message(conversation, "session:1", {"role": "user", "content": "x"})
 
         conversation.append.assert_not_called()
 

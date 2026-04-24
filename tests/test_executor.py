@@ -200,6 +200,73 @@ class TestDirectExecutorRecord:
         conversation.record.assert_awaited_once_with("session:1", msgs)
 
 
+class TestDirectExecutorAppendMessage:
+    """Per-message persistence path. When the Conversation implements
+    ``append`` as a real coroutine, ``append_message`` forwards to it.
+    When it doesn't (e.g. a test MagicMock where any attribute access
+    returns a Mock), ``append_message`` must be a no-op — otherwise
+    every existing test that mocks Conversation would accidentally hit
+    the per-message path and break on ``await`` of a non-coroutine.
+    """
+
+    async def test_forwards_to_conversation_append(self) -> None:
+        executor = DirectExecutor()
+        conversation = MagicMock()
+        conversation.append = AsyncMock()
+        msg = {"role": "assistant", "content": "hi"}
+
+        await executor.append_message(conversation, "session:1", msg)
+
+        conversation.append.assert_awaited_once_with("session:1", msg)
+
+    async def test_noop_when_append_is_plain_mock(self) -> None:
+        """A MagicMock's ``.append`` is itself a MagicMock, not a
+        coroutine — the executor must skip it, not ``await`` a non-
+        awaitable and crash. Locks in backwards compat for the many
+        existing tests that mock Conversation without asyncifying
+        every attribute.
+        """
+        executor = DirectExecutor()
+        conversation = MagicMock()  # append is a bare MagicMock, NOT AsyncMock
+
+        # Must not raise. The existing mock test suite depends on this.
+        await executor.append_message(
+            conversation, "session:1", {"role": "user", "content": "x"}
+        )
+
+        conversation.append.assert_not_called()
+
+    async def test_noop_when_append_missing(self) -> None:
+        executor = DirectExecutor()
+
+        class _MinimalConversation:
+            """No ``append`` method — legacy Conversation implementations
+            that only support end-of-turn ``record`` still need to work."""
+
+        await executor.append_message(
+            _MinimalConversation(), "session:1", {"role": "user", "content": "x"}
+        )
+
+
+class TestDirectExecutorPostTurn:
+    async def test_forwards_to_conversation_post_turn(self) -> None:
+        executor = DirectExecutor()
+        conversation = MagicMock()
+        conversation.post_turn = AsyncMock()
+
+        await executor.post_turn(conversation, "session:1")
+
+        conversation.post_turn.assert_awaited_once_with("session:1")
+
+    async def test_noop_when_post_turn_is_plain_mock(self) -> None:
+        executor = DirectExecutor()
+        conversation = MagicMock()
+
+        await executor.post_turn(conversation, "session:1")
+
+        conversation.post_turn.assert_not_called()
+
+
 class TestDirectExecutorClear:
     async def test_delegates_to_conversation(self) -> None:
         executor = DirectExecutor()

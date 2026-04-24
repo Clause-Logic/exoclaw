@@ -7,6 +7,7 @@ retry strategies, or execution environments).
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import threading
 import time
@@ -22,6 +23,21 @@ from exoclaw.providers.types import LLMResponse
 
 if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
+
+
+def _supports_append(conversation: object) -> bool:
+    """Return True if the Conversation implements ``append`` as a real
+    coroutine. ``hasattr`` would return True for a MagicMock stand-in,
+    so tests that patch Conversation with a plain Mock wouldn't
+    accidentally activate the per-message path.
+    """
+    fn = getattr(conversation, "append", None)
+    return asyncio.iscoroutinefunction(fn)
+
+
+def _supports_post_turn(conversation: object) -> bool:
+    fn = getattr(conversation, "post_turn", None)
+    return asyncio.iscoroutinefunction(fn)
 
 
 _uuid7_lock = threading.Lock()
@@ -115,12 +131,40 @@ class Executor(Protocol):
         **kwargs: list[str] | None,
     ) -> list[dict[str, object]]: ...
 
+    async def append_message(
+        self,
+        conversation: Conversation,
+        session_id: str,
+        message: dict[str, object],
+    ) -> None:
+        """Persist a single message mid-turn via the Conversation.
+
+        Durable executors (DBOS, Temporal) wrap this in a step/activity
+        so the append is replay-safe on crash recovery. Pass-through
+        executors just forward to ``conversation.append``.
+        """
+        ...
+
+    async def post_turn(
+        self,
+        conversation: Conversation,
+        session_id: str,
+    ) -> None:
+        """Fire end-of-turn hooks after all messages have been persisted."""
+        ...
+
     async def record(
         self,
         conversation: Conversation,
         session_id: str,
         new_messages: list[dict[str, object]],
-    ) -> None: ...
+    ) -> None:
+        """Deprecated — prefer ``append_message`` + ``post_turn``.
+
+        Kept so the agent loop can fall back to end-of-turn persistence
+        when a Conversation implementation doesn't support ``append``.
+        """
+        ...
 
     async def clear(
         self,
@@ -289,6 +333,25 @@ class DirectExecutor:
         )
         self.set_messages(messages)
         return messages
+
+    async def append_message(
+        self,
+        conversation: Conversation,
+        session_id: str,
+        message: dict[str, object],
+    ) -> None:
+        # Pass-through — DirectExecutor has no workflow replay to worry
+        # about. Durable executors override this with a step-wrapped call.
+        if _supports_append(conversation):
+            await conversation.append(session_id, message)
+
+    async def post_turn(
+        self,
+        conversation: Conversation,
+        session_id: str,
+    ) -> None:
+        if _supports_post_turn(conversation):
+            await conversation.post_turn(session_id)
 
     async def record(
         self,

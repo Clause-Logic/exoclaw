@@ -339,6 +339,59 @@ class TestRunAgentLoop:
         assert final == "actual answer"
         assert "<think>" not in final
 
+    async def test_preserves_pre_seeded_prior_source(self) -> None:
+        """Phase 2b's lazy ``PriorSource`` must survive through
+        ``_run_agent_loop``. Regression: an earlier version of
+        this method unconditionally called
+        ``self._executor.set_messages(initial_messages)`` at the
+        top, overwriting the source ``build_prompt`` had just
+        installed and defeating the phase 2b RAM reduction
+        end-to-end. See ``docs/memory-model.md`` "Step A" and
+        the integration test under
+        ``exoclaw-nanobot/tests/test_phase_persistence_integration.py``.
+        """
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
+
+        # Install a sentinel source, then run the loop.
+        sentinel = lambda: [{"role": "user", "content": "from-source"}]  # noqa: E731
+        loop._executor.set_prior_source(sentinel)
+
+        await loop._run_agent_loop([{"role": "user", "content": "shouldnt-seed"}])
+
+        # Source object identity must be unchanged — neither the
+        # hot-path ``set_messages(initial_messages)`` nor any other
+        # sneak-path replaced it.
+        assert loop._executor._prior_var.get() is sentinel, (
+            "_run_agent_loop replaced the PriorSource installed before "
+            "the call — phase 2b auto-wire would never survive real "
+            "production flow with this regression."
+        )
+
+    async def test_back_compat_seeds_empty_executor_from_initial(self) -> None:
+        """Back-compat safety net: if a caller invokes
+        ``_run_agent_loop`` directly without going through
+        ``build_prompt`` first (typical in test shims), the
+        executor's prior is empty and the loop falls back to
+        seeding from ``initial_messages``. Keeps all the older
+        ``_run_agent_loop([{...}])`` tests green without forcing
+        every one to construct a whole build_prompt plumb-through.
+        """
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
+
+        # Executor is fresh — no prior source installed.
+        assert loop._executor.load_messages() == []
+
+        await loop._run_agent_loop(
+            [{"role": "user", "content": "seed-me"}],
+        )
+
+        # ``initial_messages`` was used to seed prior. The user
+        # message is reachable via load_messages.
+        loaded = loop._executor.load_messages()
+        assert any(m.get("content") == "seed-me" for m in loaded)
+
 
 # ---------------------------------------------------------------------------
 # process_turn

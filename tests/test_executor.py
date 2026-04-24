@@ -338,6 +338,70 @@ class TestDirectExecutorPriorDeltaSplit:
         msgs.append({"role": "assistant", "content": "injected"})
         assert executor.load_messages() == [{"role": "user", "content": "original"}]
 
+    def test_set_prior_source_growth_independent_of_source_return_size(self) -> None:
+        """Pin the phase 2b RAM invariant with a real bytes-level
+        measurement: the executor's heap growth from
+        ``set_prior_source`` must be roughly constant regardless of
+        how large the list that source ``would`` return is.
+
+        A regression that captured the source's return value (e.g. by
+        pre-materialising the list inside the executor instead of
+        storing the callable) would show growth proportional to the
+        hypothetical return size. Two orders of magnitude of history
+        size with near-identical executor growth is the invariant
+        phase 2b was shipped for.
+
+        Uses ``tracemalloc`` rather than the behavioural identity
+        checks above because this is the actual RAM question —
+        "do we hold the bytes or just the callable." Wrapped in
+        ``gc.collect()`` calls to settle the interpreter's internal
+        allocations between snapshots so the delta reflects the
+        executor's state, not Python runtime noise.
+        """
+        import gc
+        import tracemalloc
+
+        # Two history sizes — one small, one 100× larger. Both exist
+        # in memory before we measure; we're asking whether the
+        # executor duplicates them or just holds a reference.
+        small_history = [{"role": "user", "content": "x" * 100} for _ in range(10)]
+        big_history = [{"role": "user", "content": "x" * 100} for _ in range(1000)]
+
+        def _measure_growth(history: list[dict[str, object]]) -> int:
+            executor = DirectExecutor()
+            gc.collect()
+            tracemalloc.start()
+            snap_before = tracemalloc.take_snapshot()
+            # The closure captures ``history`` by reference — it
+            # does NOT allocate a copy. The only new bytes should be
+            # the closure object itself plus the ContextVar set.
+            executor.set_prior_source(lambda: history)
+            snap_after = tracemalloc.take_snapshot()
+            tracemalloc.stop()
+            stats = snap_after.compare_to(snap_before, "lineno")
+            return sum(s.size_diff for s in stats)
+
+        growth_small = _measure_growth(small_history)
+        growth_big = _measure_growth(big_history)
+
+        # The delta between small-source and big-source growth
+        # measures whether the executor duplicates source bytes.
+        # With a correct implementation it's on the order of tens
+        # of bytes (noise between runs); a regression that copied
+        # would show a delta near ``len(big) - len(small)`` bytes.
+        # 10 KB ceiling covers tracemalloc/GC noise with headroom
+        # while still catching any real duplication.
+        delta = abs(growth_big - growth_small)
+        history_size_delta = len(str(big_history)) - len(str(small_history))
+        assert delta < 10_000, (
+            f"set_prior_source growth depends on source return size: "
+            f"small-source growth {growth_small}B, big-source growth "
+            f"{growth_big}B, delta {delta}B (history size delta was "
+            f"~{history_size_delta}B). A regression that materialises "
+            f"the source's return inside the executor would show up "
+            f"here as delta ≈ history_size_delta."
+        )
+
     def test_sequential_turns_on_same_task_dont_leak_delta(self) -> None:
         """Sequential turns on the same executor and same asyncio
         task share the ContextVar binding. Without the delta clear

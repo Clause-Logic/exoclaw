@@ -188,8 +188,28 @@ class AgentLoop:
         method with a narrower signature continue to work — callers
         inside exoclaw always pass it; external stubs keep their
         existing (initial_messages, on_progress, model) shape.
+
+        Does NOT unconditionally seed the executor via
+        ``set_messages(initial_messages)`` — that would overwrite the
+        phase-2b ``PriorSource`` that ``build_prompt`` just installed,
+        defeating the RAM reduction. In the production flow
+        (``_process_turn_inline`` → ``build_prompt`` → this method)
+        the executor is already seeded.
+
+        A fallback DOES seed if the executor's prior is empty — only
+        possible when a caller (typically a test) invokes
+        ``_run_agent_loop`` directly without going through
+        ``build_prompt``. Old tests passing ``initial_messages``
+        keep working; the real flow is unaffected because
+        ``load_messages()`` is non-empty after ``build_prompt``.
+
+        See ``docs/memory-model.md`` "Step A" for the history.
         """
-        self._executor.set_messages(initial_messages)
+        # Only seed from ``initial_messages`` if the executor wasn't
+        # pre-seeded by ``build_prompt`` — a test-shim back-compat
+        # safety net that is a no-op under the production flow.
+        if not self._executor.load_messages():
+            self._executor.set_messages(initial_messages)
         iteration = 0
         final_content = None
         tools_used: list[str] = []

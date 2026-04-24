@@ -50,8 +50,15 @@ Even with both stores in place, an in-flight turn holds meaningful RAM:
 > concurrent turns (e.g. a cron firing mid-IPC-turn) trampled each
 > other's buffer, cross-contaminating LLM context and cross-writing
 > session JSONLs. The current implementation binds the buffer to a
-> `ContextVar` so each asyncio task gets its own list; this section
-> below still applies to the RAM side of the story.
+> `ContextVar` so each asyncio task gets its own list.
+>
+> **Note (post-phase-2a):** the single `_messages_var` described
+> below was split into `_prior_var` (a `PriorSource` callable) +
+> `_delta_var` (a list of messages produced this turn) in exoclaw
+> 0.19.1. The structural story this section describes still holds
+> — at the moment of the httpx send there are still three copies —
+> but "the buffer" is now two ContextVars. See "Current state"
+> below for what actually shipped.
 
 
 Every iteration of `AgentLoop._run_agent_loop` does:
@@ -79,9 +86,14 @@ a 50 KB tool result in the middle runs the buffer up to 500 KB–2 MB
 *before* you account for the doubling/tripling at the httpx call.
 
 This buffer is *not* a useless mirror of the JSONL — it holds the
-*in-progress* messages of the current turn, which are only flushed to
-disk when `Conversation.record()` runs at end of turn. Until then it
-is the only place those messages live.
+*in-progress* messages of the current turn. Historically they were
+only flushed to disk when `Conversation.record()` ran at end of
+turn, so the buffer was the only place those messages lived. Phase
+1 (see below) changed that: each message is flushed per-produce
+via `Conversation.append`, so a mid-turn crash no longer loses the
+transcript. The buffer still exists in-memory (the LLM needs the
+full conversation as its next request body), it just isn't the
+single source of truth for durability anymore.
 
 ## Why durability doesn't save RAM today
 
@@ -91,65 +103,301 @@ is the only place those messages live.
 - The durability contract is "if the process dies, a new process can
   replay the workflow from the journal." It is not "the live process
   can release the workflow's working set while it waits for IO."
-- The JSONL is updated at turn boundaries, not per-message. Even if
-  every message *were* flushed immediately, the executor still needs a
-  message list in RAM to build the next prompt (every LLM call requires
-  the full conversation in its request body).
+- Per-message flushing (phase 1, shipped) fixed the crash-recovery
+  hole — messages make it to disk as they're produced, not at
+  turn-end. But this didn't reduce RAM by itself: the executor
+  still needs a message list in RAM to build the next prompt
+  (every LLM call requires the full conversation in its request
+  body). The RAM reduction depends on phase 2+3 — see "Current
+  state" and "Next steps" below.
 
-## What would actually save RAM
+## Current state: what's shipped, what it bought
 
-Ordered by increasing effort:
+Three phases on a multi-phase plan toward near-zero working set. The
+first two are in PyPI and deployed to openclaw; phase 3 is not started.
 
-1. **Flush every new message to the JSONL as it's produced** (after each
-   `_chat_step`, after each `_tool_step`), not batched at `record()`.
-2. **Convert the executor buffer from "full list" to "deltas + offset."**
-   Executor tracks only messages produced this turn; prompt building
-   reads prior history from disk (or a memory-mapped view) on demand.
-3. **Stream the httpx request body instead of materializing the JSON.**
-   Generator → chunked request. Avoids the third copy of the messages
-   list during the send.
-4. **Workflow-frame eviction** — Temporal's model. Between activities,
-   the workflow worker drops the coroutine frame and reloads it from
-   history when the next activity completes. Per-idle-workflow RAM
-   approaches zero. DBOS could implement this but doesn't today.
-5. **Per-step ephemeral processes** — each step runs in a fresh process,
-   reads inputs from the journal, writes outputs, exits. Most aggressive;
-   highest latency per step.
+### Phase 1 — per-message JSONL append [SHIPPED]
 
-Combining (1)+(2)+(3) would get per-subagent RAM from a few MB of working
-set down to a few hundred KB plus the unavoidable HTTP buffers. (4) and
-(5) are the jumps to truly disk-backed execution, where concurrent-
-subagent count is bounded by external resources (budget, task queue
-depth) rather than the cgroup's memory limit.
+*exoclaw 0.19.0 · exoclaw-conversation 0.15.0 · exoclaw-executor-dbos 0.12.0*
+
+`Conversation` gains an opt-in `AppendableConversation` extension:
+`append(session_id, message)` + `post_turn(session_id)`. The agent
+loop detects the capability (via `asyncio.iscoroutinefunction`
+inspection of `append`) and switches from end-of-turn
+`record(new_messages)` to per-message flush: each assistant response,
+tool result, and the incoming user message writes one line to the
+session JSONL as it's produced. `post_turn` handles end-of-turn
+hooks; `record` is skipped entirely on this path.
+
+`DBOSExecutor.append_message` wraps each flush in a `@DBOS.step`, so
+on workflow replay the step's journaled completion returns without
+re-writing the same message to disk. Matches PR #44's at-least-once
+posture for the final-reply send — duplicate write on crash between
+publish and mark, never a silent drop.
+
+**What it bought:** crash-recoverability. A mid-turn OOM no longer
+loses the partially-produced transcript. The deployed executor on
+openclaw stopped orphaning subagent completions after DBOS recovery
+(see the 2026-04-23 feed-digest-retry incident post-mortem). Did
+**not** reduce RAM — the in-memory buffer still held the full turn
+state because subsequent iterations still needed it for prompt
+construction. Phase 1 is the foundation that made phase 2 possible.
+
+### Phase 2a — prior/delta split [SHIPPED]
+
+*exoclaw 0.19.1 · exoclaw-executor-dbos 0.13.0*
+
+`DirectExecutor` and `DBOSExecutor` split the single `_messages_var`
+ContextVar into a `_prior_var` (read-only, set at turn start) and a
+`_delta_var` (appended to mid-turn). `load_messages()` concatenates
+prior + delta into a fresh list; `set_messages` seeds prior and
+clears delta; `append_messages` extends delta only. Prior is
+guaranteed not to be touched by the append path.
+
+**What it bought:** nothing directly. Pure structural refactor.
+Enabled phase 2b by establishing the read-only-prior invariant.
+
+### Phase 2b — disk-backed `PriorSource` [SHIPPED]
+
+*exoclaw 0.20.0 · exoclaw-conversation 0.16.0 · exoclaw-executor-dbos 0.13.1*
+
+`_prior_var` now stores a callable `PriorSource` rather than a
+`list[dict]`. `DirectExecutor.set_prior_source(source)` installs a
+lazy source; `set_messages` is a snapshot-closure wrapper (back-compat).
+`load_messages` invokes the source each call.
+
+`DefaultConversation` grows `load_persisted_history(session_id)` (sync,
+no consolidation side effects) — the hook a lazy source needs to
+re-fetch the history slice from session state each iteration.
+
+`DBOSExecutor.build_prompt` auto-detects the capability and
+installs a disk-backed source by locating the history slice in
+`build_prompt`'s return. Slice match is by **dict equality** (not
+`id()`) — critical for the real `DefaultConversation`, whose
+`session.get_history` strips timestamps and returns fresh dicts per
+call. An earlier id-based version shipped in 0.13.0 always fell back
+to snapshot mode in production; 0.13.1 fixes that.
+
+**What it bought, in principle:** the history slice (typically the
+bulk of prompt size) would not be held in `_prior_var` between LLM
+iterations — re-read on demand per `load_messages` call. Combined
+with phase 1 flushing, the between-iteration heap footprint would
+drop to roughly (delta-so-far + httpx-connection-state).
+
+**What it bought in practice:** [nothing yet] — a subsequently-
+discovered bug in the AgentLoop means phase 2b's auto-wire is
+immediately overwritten. `_run_agent_loop` unconditionally calls
+`self._executor.set_messages(initial_messages)` at the top of each
+turn, installing a snapshot closure that replaces the lazy source
+`build_prompt` just wired up. See "Known gaps" below.
+
+## Known gaps
+
+### 2b auto-wire overwrite in `_run_agent_loop`
+
+`exoclaw.agent.loop.AgentLoop._run_agent_loop`:
+
+```python
+async def _run_agent_loop(self, initial_messages, ...):
+    self._executor.set_messages(initial_messages)   # overwrites phase 2b source
+```
+
+`build_prompt` installs a `PriorSource` via `set_prior_source`, then
+returns. `_run_agent_loop` immediately calls `set_messages(initial)`,
+wrapping `initial` in a snapshot closure that replaces the lazy one.
+So phase 2b's RAM behaviour is structurally in place in the executor
+but not actually observable through the real loop path. Needs a
+small core fix: drop the redundant `set_messages` call (the executor
+is already seeded by `build_prompt` under the normal path).
+
+### Cgroup accounting vs Python heap accounting
+
+Moving data from Python heap to disk doesn't always remove it from
+the cgroup's memory charge. Filesystem reads populate the OS page
+cache, which is accounted against the cgroup under `memory.current`
+on cgroup v2. "Near-zero Python RSS" ≠ "near-zero cgroup usage"
+when the process re-reads session JSONL on every iteration.
+
+Mitigation: set `vm.dirty_ratio` appropriately and accept that page
+cache will hold hot session bytes in shared kernel memory. Doesn't
+save you under a cgroup limit, but the bytes are reclaimable — under
+pressure the kernel can drop them without the process having a say,
+which matters for the average-vs-peak story.
+
+## Next steps toward near-zero working set
+
+Everything below is NOT shipped. Ordered by increasing effort and
+decreasing incrementality.
+
+### Step A — unblock phase 2b
+
+Remove the `set_messages(initial_messages)` call at the top of
+`_run_agent_loop`. Half an hour of work, unblocks the phase 2b RAM
+reduction that's already sitting in production but inert. Phase 2b
+tests at the executor surface pass; the AgentLoop-level integration
+test in `exoclaw-nanobot/tests/test_phase_persistence_integration.py`
+documents the gap with a TODO.
+
+### Step B — streaming LLM request body (phase 3)
+
+Replace `json.dumps(messages)` inside the provider adapter with a
+generator that yields JSON chunks: `b'{"messages":['` → one
+`json.dumps(msg)` per yielded piece → `b']}'`. Pipe into httpx's
+streaming-body support. Kills the "third copy" — the JSON string
+that coexists with the Python list at the moment of send.
+
+Touches the provider protocol (currently takes `messages: list`,
+needs to accept `messages: AsyncIterable | list`). Every provider
+impl (LiteLLM, direct, any future) needs updating. Response path
+already supports streaming (SSE) on all major providers — just need
+to use it.
+
+**Effect combined with Steps A+B:** per-subagent peak drops from the
+current ~3× prompt-size (list + JSON + httpx buffer) to roughly 1×
+prompt content + small streaming buffers. Memory-model-doc-original
+estimate of "a few hundred KB plus unavoidable HTTP buffers" per
+active subagent.
+
+### Step C — no SessionManager cache
+
+`SessionManager` currently holds sessions in a `WeakValueDictionary`;
+as long as any caller has a strong ref, the session (with its full
+`messages: list`) stays resident. Change the contract: every read
+reads from disk via `mmap` or a line iterator. No session object
+owns a Python list of all messages.
+
+`DefaultConversation.load_persisted_history` becomes a generator of
+fresh dicts parsed from the JSONL on demand. Hot pages end up in the
+OS page cache (see "Cgroup accounting" above), not Python heap.
+
+Touches: `SessionManager`, `DefaultConversation`, any code that
+holds onto the session object expecting `.messages` to be mutable.
+The in-progress turn's new messages can't live on the session
+object anymore — they're the executor's delta (phase 2a already
+put them there).
+
+**Effect combined with A+B+C:** the only Python-heap state per
+active subagent is the coroutine frame, the delta (messages
+produced this turn), loaded skill content, and in-flight HTTP
+buffers. For a turn with no tool-result explosions, that's
+~50–200 KB per subagent vs. today's ~2–5 MB.
+
+### Step D — streaming tool results
+
+Tool results today return synchronously as a `str` held by the
+Python frame until the next `_chat_step` consumes it. A 50 KB
+web-fetch result, a 500 KB database query result — all held in the
+message list until end of turn.
+
+Would require a tool-protocol change to let tools stream their
+output (async iterator returning chunks). The executor's tool-step
+would persist chunks to a tool-result scratch file as they arrive
+and pass the file handle to the next LLM call instead of the full
+content. Tools that return small responses (`bool`, short strings)
+stay inline; the rewrite is only for tools that legitimately produce
+multi-MB results.
+
+### Step E — workflow-frame eviction (Temporal-style)
+
+The Temporal model: between activities, the workflow worker drops
+the Python coroutine frame entirely. Next activity's completion
+triggers a replay from event history up to the point where the
+frame is resurrected. Per-idle-workflow RAM approaches zero.
+
+DBOS does **not** do this today — the coroutine frame stays
+resident across `@DBOS.step` await boundaries, just like a normal
+asyncio coroutine. To get Temporal-style eviction on DBOS would
+require upstream DBOS changes (or migrating fan-out workloads to
+a Temporal executor plugin, which the `Executor` protocol
+supports by design).
+
+This is where "concurrent subagent count bounded by external
+resources rather than cgroup memory" stops being a limit. The
+cost is cold-start latency per activity — every resume pays the
+history-replay cost. Fine for workflows that idle for seconds;
+tight for sub-second tool loops.
+
+### Step F — per-step ephemeral processes
+
+Each step runs in a fresh subprocess: read inputs from the
+journal, run the step body, write outputs, exit. No persistent
+Python process per workflow. Most aggressive option on the
+disk-spectrum; highest per-step latency (process fork + interpreter
+start). Historically only practical for batch-style durable
+executors (Airflow, Prefect); realtime agent loops would hate the
+per-step overhead.
+
+Included here for completeness — not a near-term target. If we ever
+get to the point where the cgroup limit binds even with A+B+C+D
+shipped, this is the next lever.
+
+## Target numbers
+
+Rough per-active-subagent peak memory, openclaw production turn
+with ~1 MB of prompt history and ~3 LLM iterations:
+
+| Scenario | Peak per subagent | 8 concurrent | Fits 512 MiB? |
+|---|---|---|---|
+| Today (phase 2b inert due to overwrite bug) | ~5 MB | ~40 MB | yes, but sawtoothy |
+| Step A only (2b unblocked) | ~5 MB peak, ~2 MB between iterations | ~40 MB peak, ~16 MB avg | yes, comfortably |
+| Steps A+B | ~2 MB peak | ~16 MB | yes, with headroom |
+| Steps A+B+C | ~200 KB peak | ~1.6 MB | trivially |
+| Steps A+B+C+D | ~100 KB peak | ~800 KB | trivially |
+| Steps A–E | ~0 (only active-step frames resident) | bounded by external queue | dropped the question |
+
+"8 concurrent" is openclaw's current `SUBAGENT_MAX_CONCURRENT`.
+With A+B shipped, that cap could probably move to 50–100 without
+the cgroup binding. With A+B+C, the cap becomes an LLM
+rate-limit / budget question, not a memory one.
 
 ## Practical implications
 
-- "We have durability, so memory shouldn't matter" — false. Durability
-  is a recovery property. RAM still matters for concurrent fan-out.
-- `DBOS` + `Temporal` differ here: Temporal sheds workflow state between
-  activities via its sandbox model; DBOS does not. If future durable
-  executors want to compete with Temporal on fan-out scale, workflow
-  eviction is the architectural jump, not "more durable storage."
-- In-process concurrency is bounded by `total_cgroup_memory /
-  per_subagent_working_set`. For the current implementation that's
-  roughly 2–5 MB per active subagent, so a 512 MB cgroup caps at the
-  low hundreds — not millions. Capping subagent concurrency in the
-  spawner (see `SubagentSpawner.max_concurrent`) is the short-term
-  answer; reducing per-subagent working set is the long-term one.
+- "We have durability, so memory shouldn't matter" — still false, even
+  after phase 1+2. Durability is a recovery property. RAM still
+  matters for concurrent fan-out.
+- Concurrent capacity per host is `total_cgroup_memory /
+  per_subagent_peak`. Today ≈ 5 MB per active subagent under the
+  phase 2b overwrite bug; Step A unblocking gets that structurally
+  down without other code changes, but doesn't change peak (which is
+  dominated by the httpx-send tripling described in "The `_messages`
+  buffer" above).
+- **Steps A and B are the near-term work with the biggest
+  return-per-effort.** A is a one-line core fix. B is the phase 3
+  streaming-httpx-body work; a few days touching the provider
+  protocol. Together they drop peak enough that openclaw's 512 MiB
+  cgroup stops being the binding constraint on subagent fan-out.
+- Capping subagent concurrency in the spawner (see
+  `SubagentSpawner.max_concurrent`) is the short-term cushion. It's
+  not a bug that this cap exists; it's that the cap should be set
+  by LLM rate limits and budget, not by RAM.
 
 ## When to revisit
 
-Revisit if any of these become true:
+Signals that push us to the next step:
 
-- Subagent fan-out needs to scale past ~100 concurrent on a single host.
-- Turn latency becomes dominated by httpx buffer allocation rather than
-  the LLM call itself.
-- An executor ships workflow-frame eviction (DBOS adding it, or migrating
-  fan-out workloads to a Temporal executor).
-- A tool legitimately needs to return multi-MB results (video transcripts,
-  large document processing) and holding them in the message buffer
-  starts starving other work.
+- **Step A (unblock phase 2b)**: should be done unconditionally — it's
+  a one-line fix to realise RAM reduction already in the codebase.
+- **Step B (streaming request body)**: do when any single subagent's
+  peak during the LLM call crosses ~10 MB (very large history, long
+  tool results stacking up, or a subagent doing many iterations).
+- **Step C (no SessionManager cache)**: do when a single session's
+  history JSONL grows past ~5 MB and `get_or_create` holding it in
+  RAM affects memory headroom across concurrent sessions.
+- **Step D (streaming tool results)**: do when a tool legitimately
+  needs to return multi-MB results (video transcripts, large
+  document processing, bulk DB exports) and holding them in the
+  message buffer starves other work.
+- **Step E (workflow-frame eviction)**: do when subagent fan-out
+  needs to scale past ~100 concurrent on a single host, or when a
+  Temporal-executor plugin shows up and inherits this for free.
+- **Step F (per-step ephemeral processes)**: do when none of the
+  above are enough and per-activity latency-tolerance is high
+  (think: overnight batch workflows, not interactive agents).
 
-Until then, the pattern is: keep concurrency caps at each layer (spawner,
-provider, bus), accept the current per-subagent footprint, and treat
-"more RAM" as a valid answer when capping isn't.
+Until a step gets done, the pattern is: keep concurrency caps at
+each layer (spawner, provider, bus), accept the current per-subagent
+footprint, and treat "more RAM" as a valid answer when capping
+isn't. Raising the openclaw cgroup from 512 MiB to 1 GiB is a
+legitimate short-term answer that buys 2× headroom immediately;
+Step A+B buy ~10× longer-term and need to land before the next big
+fan-out push.

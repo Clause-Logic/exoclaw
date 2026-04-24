@@ -236,6 +236,108 @@ class TestDirectExecutorPriorDeltaSplit:
         assert executor._get_prior() is prior_ref
         assert prior_ref == [{"role": "system", "content": "sys"}]
 
+    def test_set_prior_source_invokes_source_on_each_load(self) -> None:
+        """``set_prior_source`` stores a callable. Each
+        ``load_messages`` invokes it — the source can return
+        different values across calls.
+
+        A disk-backed source reads the JSONL fresh on each call; a
+        dynamic in-memory source (like the one below) lets tests
+        pin that invariant without touching the filesystem.
+        """
+        executor = DirectExecutor()
+        counter = {"n": 0}
+
+        def source() -> list[dict[str, object]]:
+            counter["n"] += 1
+            return [{"role": "user", "content": f"call-{counter['n']}"}]
+
+        executor.set_prior_source(source)
+        loaded1 = executor.load_messages()
+        loaded2 = executor.load_messages()
+
+        assert counter["n"] == 2, "source must be invoked on each load"
+        assert loaded1 == [{"role": "user", "content": "call-1"}]
+        assert loaded2 == [{"role": "user", "content": "call-2"}]
+
+    def test_set_prior_source_clears_delta(self) -> None:
+        """Analogous to ``set_messages``: installing a new prior
+        source drops any delta that grew on the prior one. Otherwise
+        sequential turns on the same task leak their delta state."""
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "user", "content": "t1"}])
+        executor.append_messages([{"role": "assistant", "content": "t1-asst"}])
+
+        executor.set_prior_source(lambda: [{"role": "user", "content": "t2"}])
+
+        assert executor._get_delta() == []
+        assert executor.load_messages() == [{"role": "user", "content": "t2"}]
+
+    def test_set_prior_source_does_not_hold_list(self) -> None:
+        """The whole point of phase 2b: a disk-backed source lets
+        prior not be heap-resident between iterations. If the source
+        closure doesn't capture the list, the list can be GC'd after
+        each ``load_messages`` call.
+
+        Simulate with a source that reads from a mutable wrapper —
+        the prior_var itself holds only the source callable, not
+        the list.
+        """
+        import sys
+
+        executor = DirectExecutor()
+        storage = {"msgs": [{"role": "user", "content": "on-demand"}]}
+
+        def source() -> list[dict[str, object]]:
+            return list(storage["msgs"])
+
+        executor.set_prior_source(source)
+
+        # The ContextVar should hold the callable, not a list.
+        stored = executor._prior_var.get()
+        assert callable(stored)
+        assert stored is source
+
+        # Swap the underlying storage — next load_messages reflects it.
+        storage["msgs"] = [{"role": "user", "content": "swapped"}]
+        assert executor.load_messages() == [{"role": "user", "content": "swapped"}]
+
+        # sys.getrefcount is a sanity check that the list isn't
+        # squirrelled away somewhere in the executor. The source
+        # closure doesn't capture it (it re-reads storage each call).
+        the_list = storage["msgs"]
+        # Expected refs: our local ``the_list``, the dict ``storage["msgs"]``,
+        # and Python's getrefcount-arg-temporary. No executor ref.
+        assert sys.getrefcount(the_list) <= 3
+
+    def test_set_messages_uses_prior_source_under_the_hood(self) -> None:
+        """Back-compat: ``set_messages`` should route through the
+        same source machinery. Otherwise the two APIs would diverge
+        in subtle ways (delta clearing, etc.)."""
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "user", "content": "hi"}])
+
+        # prior_var holds a callable, not the list itself.
+        stored = executor._prior_var.get()
+        assert callable(stored)
+
+        # Invoking it returns the snapshotted list.
+        assert stored() == [{"role": "user", "content": "hi"}]
+
+    def test_set_messages_snapshot_isolated_from_caller_mutation(self) -> None:
+        """The back-compat ``set_messages`` closure captures a
+        snapshot, not the caller's list reference. If a caller
+        mutates its list after ``set_messages`` returns, the executor
+        must not see the mutation — otherwise the pre-refactor
+        "fresh list per call" guarantee would regress.
+        """
+        executor = DirectExecutor()
+        msgs = [{"role": "user", "content": "original"}]
+        executor.set_messages(msgs)
+
+        msgs.append({"role": "assistant", "content": "injected"})
+        assert executor.load_messages() == [{"role": "user", "content": "original"}]
+
     def test_sequential_turns_on_same_task_dont_leak_delta(self) -> None:
         """Sequential turns on the same executor and same asyncio
         task share the ContextVar binding. Without the delta clear

@@ -372,10 +372,17 @@ class TestDirectExecutorPriorDeltaSplit:
             gc.collect()
             tracemalloc.start()
             snap_before = tracemalloc.take_snapshot()
-            # The closure captures ``history`` by reference — it
-            # does NOT allocate a copy. The only new bytes should be
-            # the closure object itself plus the ContextVar set.
-            executor.set_prior_source(lambda: history)
+            # The source allocates fresh dicts *on invocation* —
+            # proportional to ``history`` size. If
+            # ``set_prior_source`` accidentally invokes the source
+            # or materialises its return (e.g. by storing
+            # ``source()`` instead of ``source``), the measured
+            # growth here will scale with history size and trip the
+            # assertion. A lambda returning ``history`` directly
+            # would not: the list is already allocated outside the
+            # timed block, and any accidental invocation would
+            # return an existing ref without new allocations.
+            executor.set_prior_source(lambda: [dict(m) for m in history])
             snap_after = tracemalloc.take_snapshot()
             tracemalloc.stop()
             stats = snap_after.compare_to(snap_before, "lineno")

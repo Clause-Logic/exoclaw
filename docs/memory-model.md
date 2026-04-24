@@ -184,31 +184,28 @@ iterations — re-read on demand per `load_messages` call. Combined
 with phase 1 flushing, the between-iteration heap footprint would
 drop to roughly (delta-so-far + httpx-connection-state).
 
-**What it bought in practice:** [nothing yet] — a subsequently-
-discovered bug in the AgentLoop means phase 2b's auto-wire is
-immediately overwritten. `_run_agent_loop` unconditionally calls
-`self._executor.set_messages(initial_messages)` at the top of each
-turn, installing a snapshot closure that replaces the lazy source
-`build_prompt` just wired up. See "Known gaps" below.
+**What it bought in practice:** deferred by an overwrite bug in
+`_run_agent_loop` (unconditional `set_messages(initial_messages)` on
+entry), fixed in exoclaw 0.20.1. After the fix, the between-
+iteration heap footprint drops by roughly the size of prior history
+per active subagent — the phase 2b RAM win is actually realised.
 
 ## Known gaps
 
-### 2b auto-wire overwrite in `_run_agent_loop`
+### ~~2b auto-wire overwrite in `_run_agent_loop`~~ [FIXED in 0.20.1]
 
-`exoclaw.agent.loop.AgentLoop._run_agent_loop`:
+Earlier versions of `AgentLoop._run_agent_loop` unconditionally
+called `self._executor.set_messages(initial_messages)` at the top,
+wrapping `initial` in a snapshot closure that replaced the lazy
+`PriorSource` `build_prompt` had just installed. So phase 2b's RAM
+behaviour was structurally in place in the executor but not
+observable through the real loop path.
 
-```python
-async def _run_agent_loop(self, initial_messages, ...):
-    self._executor.set_messages(initial_messages)   # overwrites phase 2b source
-```
-
-`build_prompt` installs a `PriorSource` via `set_prior_source`, then
-returns. `_run_agent_loop` immediately calls `set_messages(initial)`,
-wrapping `initial` in a snapshot closure that replaces the lazy one.
-So phase 2b's RAM behaviour is structurally in place in the executor
-but not actually observable through the real loop path. Needs a
-small core fix: drop the redundant `set_messages` call (the executor
-is already seeded by `build_prompt` under the normal path).
+Fixed in exoclaw 0.20.1: the seed was dropped entirely.
+`initial_messages` is retained on the signature for back-compat
+with monkey-patching test shims but the parameter is unused.
+Production flow always seeds via `build_prompt` before the loop
+body runs.
 
 ### Cgroup accounting vs Python heap accounting
 
@@ -229,14 +226,12 @@ which matters for the average-vs-peak story.
 Everything below is NOT shipped. Ordered by increasing effort and
 decreasing incrementality.
 
-### Step A — unblock phase 2b
+### ~~Step A — unblock phase 2b~~ [SHIPPED in exoclaw 0.20.1]
 
-Remove the `set_messages(initial_messages)` call at the top of
-`_run_agent_loop`. Half an hour of work, unblocks the phase 2b RAM
-reduction that's already sitting in production but inert. Phase 2b
-tests at the executor surface pass; the AgentLoop-level integration
-test in `exoclaw-nanobot/tests/test_phase_persistence_integration.py`
-documents the gap with a TODO.
+The `set_messages(initial_messages)` overwrite at the top of
+`_run_agent_loop` was dropped. Phase 2b's lazy `PriorSource`
+survives through the loop, and the between-iteration RAM floor
+drops by ≈ prior history size per active subagent.
 
 ### Step B — streaming LLM request body (phase 3)
 
@@ -338,16 +333,15 @@ with ~1 MB of prompt history and ~3 LLM iterations:
 
 | Scenario | Peak per subagent | 8 concurrent | Fits 512 MiB? |
 |---|---|---|---|
-| Today (phase 2b inert due to overwrite bug) | ~5 MB | ~40 MB | yes, but sawtoothy |
-| Step A only (2b unblocked) | ~5 MB peak, ~2 MB between iterations | ~40 MB peak, ~16 MB avg | yes, comfortably |
-| Steps A+B | ~2 MB peak | ~16 MB | yes, with headroom |
-| Steps A+B+C | ~200 KB peak | ~1.6 MB | trivially |
-| Steps A+B+C+D | ~100 KB peak | ~800 KB | trivially |
-| Steps A–E | ~0 (only active-step frames resident) | bounded by external queue | dropped the question |
+| Current (exoclaw 0.20.1 — 2b realised) | ~5 MB peak, ~2 MB between iterations | ~40 MB peak, ~16 MB avg | yes, comfortably |
+| Step B added | ~2 MB peak | ~16 MB | yes, with headroom |
+| Steps B+C | ~200 KB peak | ~1.6 MB | trivially |
+| Steps B+C+D | ~100 KB peak | ~800 KB | trivially |
+| Steps B–E | ~0 (only active-step frames resident) | bounded by external queue | dropped the question |
 
 "8 concurrent" is openclaw's current `SUBAGENT_MAX_CONCURRENT`.
-With A+B shipped, that cap could probably move to 50–100 without
-the cgroup binding. With A+B+C, the cap becomes an LLM
+With B shipped, that cap could probably move to 50–100 without
+the cgroup binding. With B+C, the cap becomes an LLM
 rate-limit / budget question, not a memory one.
 
 ## Practical implications

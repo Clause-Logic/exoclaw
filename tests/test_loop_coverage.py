@@ -368,30 +368,6 @@ class TestRunAgentLoop:
             "production flow with this regression."
         )
 
-    async def test_back_compat_seeds_empty_executor_from_initial(self) -> None:
-        """Back-compat safety net: if a caller invokes
-        ``_run_agent_loop`` directly without going through
-        ``build_prompt`` first (typical in test shims), the
-        executor's prior is empty and the loop falls back to
-        seeding from ``initial_messages``. Keeps all the older
-        ``_run_agent_loop([{...}])`` tests green without forcing
-        every one to construct a whole build_prompt plumb-through.
-        """
-        loop, _ = _make_loop()
-        loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
-
-        # Executor is fresh — no prior source installed.
-        assert loop._executor.load_messages() == []
-
-        await loop._run_agent_loop(
-            [{"role": "user", "content": "seed-me"}],
-        )
-
-        # ``initial_messages`` was used to seed prior. The user
-        # message is reachable via load_messages.
-        loaded = loop._executor.load_messages()
-        assert any(m.get("content") == "seed-me" for m in loaded)
-
 
 # ---------------------------------------------------------------------------
 # process_turn

@@ -25,15 +25,14 @@ if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
 
 
+# Source for per-turn prior-history messages.
+#
+# Invoked by ``DirectExecutor.load_messages`` on each iteration. The
+# default implementation (installed by ``set_messages``) closes over an
+# immutable list; a disk-backed implementation re-reads a JSONL file
+# each call so the list is transient rather than heap-resident for the
+# whole turn. See ``docs/memory-model.md`` phase 2b.
 PriorSource = Callable[[], list[dict[str, object]]]
-"""Source for per-turn prior-history messages.
-
-Invoked by ``DirectExecutor.load_messages`` on each iteration. The
-default implementation (installed by ``set_messages``) closes over an
-immutable list; a disk-backed implementation re-reads a JSONL file
-each call so the list is transient rather than heap-resident for the
-whole turn. See ``docs/memory-model.md`` phase 2b.
-"""
 
 
 def _empty_prior_source() -> list[dict[str, object]]:
@@ -229,22 +228,17 @@ class Executor(Protocol):
         ...
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
-        """Replace the current message list (e.g. after compaction).
-
-        Back-compat path — the list is captured in a closure and held
-        alive for the turn. Prefer ``set_prior_source`` when a lazy
-        source (disk read, etc.) is available.
-        """
+        """Replace the current message list (e.g. after compaction)."""
         ...
 
-    def set_prior_source(self, source: PriorSource) -> None:
-        """Install a lazy source for prior-history messages.
-
-        Each ``load_messages`` invokes ``source()`` to materialise
-        prior fresh, so the list need not stay heap-resident between
-        LLM iterations. See ``docs/memory-model.md`` phase 2b.
-        """
-        ...
+    # NOTE: ``set_prior_source`` lives on ``DirectExecutor`` as a
+    # concrete method rather than on this Protocol. Keeping it off
+    # the Protocol avoids a breaking static-typing change for
+    # external executors (DBOSExecutor and any third-party impl) that
+    # previously conformed to ``Executor``. The method is opt-in:
+    # impls that want phase 2b's lazy-prior capability add it
+    # themselves; callers that rely on it narrow to the concrete
+    # executor type (or ``hasattr``-check) at the call site.
 
     async def mint_turn_id(self) -> str:
         """Produce a replay-safe unique id for one turn.
@@ -364,9 +358,12 @@ class DirectExecutor:
         # task that captured ``load_messages`` while ``set_messages``
         # runs concurrently sees its own snapshot — the snapshot list
         # is never mutated after the closure captures it.
+        #
+        # No explicit delta clear here — ``set_prior_source`` owns
+        # that invariant (both entry points need it, so centralising
+        # avoids drift between the two).
         snapshot = list(messages)
         self.set_prior_source(lambda: snapshot)
-        self._delta_var.set([])
 
     def set_prior_source(self, source: PriorSource) -> None:
         """Install a prior-history source. Each ``load_messages`` call

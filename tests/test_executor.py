@@ -236,6 +236,26 @@ class TestDirectExecutorPriorDeltaSplit:
         assert executor._get_prior() is prior_ref
         assert prior_ref == [{"role": "system", "content": "sys"}]
 
+    def test_sequential_turns_on_same_task_dont_leak_delta(self) -> None:
+        """Sequential turns on the same executor and same asyncio
+        task share the ContextVar binding. Without the delta clear
+        inside ``set_messages``, turn 2's ``load_messages`` would
+        see turn 1's assistant/tool messages leaked in.
+        """
+        executor = DirectExecutor()
+
+        # Turn 1: seed, append, load, turn ends.
+        executor.set_messages([{"role": "user", "content": "t1-user"}])
+        executor.append_messages([{"role": "assistant", "content": "t1-asst"}])
+        assert executor.load_messages() == [
+            {"role": "user", "content": "t1-user"},
+            {"role": "assistant", "content": "t1-asst"},
+        ]
+
+        # Turn 2: seed via a new set_messages. Must wipe turn 1's delta.
+        executor.set_messages([{"role": "user", "content": "t2-user"}])
+        assert executor.load_messages() == [{"role": "user", "content": "t2-user"}]
+
 
 class TestDirectExecutorBuildPrompt:
     async def test_delegates_to_conversation(self) -> None:

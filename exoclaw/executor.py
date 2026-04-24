@@ -245,12 +245,12 @@ class DirectExecutor:
       prior + delta for the LLM request body.
 
     This split is phase 2a of the memory-model doc's three-phase plan
-    (see exoclaw/docs/memory-model.md). The structural boundary lets
-    phase 2b stop holding prior as a Python list — future versions
-    read prior from the session JSONL on demand instead. Phase 2a
-    alone doesn't save RAM but establishes the invariant that prior
-    is read-only mid-turn and doesn't need to be part of
-    ``append_messages``' mutation path.
+    (see docs/memory-model.md). The structural boundary lets phase 2b
+    stop holding prior as a Python list — future versions read prior
+    from the session JSONL on demand instead. Phase 2a alone doesn't
+    save RAM but establishes the invariant that prior is read-only
+    mid-turn and doesn't need to be part of ``append_messages``'
+    mutation path.
 
     Concurrency: both ContextVars are per-executor-instance, per-task.
     A module-level or plain-instance-attr buffer would let two
@@ -303,9 +303,12 @@ class DirectExecutor:
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
         # Called from two places:
-        # 1. ``build_prompt``, which seeds prior at turn start. There
-        #    is no prior delta to clear — a fresh turn's delta is
-        #    already empty.
+        # 1. ``build_prompt``, which seeds prior at turn start. We
+        #    clear delta here too — sequential turns on the same
+        #    executor and asyncio task share the ContextVar binding,
+        #    so without the clear the next turn would see the prior
+        #    turn's delta messages leaked into its load_messages()
+        #    return.
         # 2. The compaction path, which replaces both prior and
         #    whatever grew in delta this turn with the compacted
         #    list. So we clear delta to avoid double-counting.

@@ -631,6 +631,106 @@ class TestExecutorOwnsResponseSend:
 
 
 # ---------------------------------------------------------------------------
+# Executor-owned inbound enqueue — handles_inbound_enqueue / set_inbound_hook
+# ---------------------------------------------------------------------------
+
+
+class TestExecutorOwnsInboundEnqueue:
+    async def test_direct_executor_handles_inbound_enqueue_default_false(self) -> None:
+        """``DirectExecutor`` leaves inbound on the asyncio queue — the
+        core's default behavior when no durable executor opts in."""
+        from exoclaw.executor import DirectExecutor
+
+        assert DirectExecutor.handles_inbound_enqueue is False
+
+    async def test_publish_inbound_falls_back_to_queue_when_no_hook(self) -> None:
+        """No hook installed → ``publish_inbound`` drops the message on
+        the asyncio queue for ``AgentLoop.run`` to consume, preserving
+        pre-existing behavior for pass-through executors."""
+        bus = MessageBus()
+        msg = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="hi")
+
+        await bus.publish_inbound(msg)
+
+        assert bus.inbound.qsize() == 1
+        assert bus.inbound.get_nowait() is msg
+
+    async def test_publish_inbound_routes_to_hook_when_installed(self) -> None:
+        """With a hook installed, ``publish_inbound`` forwards to it and
+        does NOT enqueue on the asyncio queue — durable executors
+        persist the message before ``publish_inbound`` returns."""
+        bus = MessageBus()
+        received: list[InboundMessage] = []
+
+        async def hook(m: InboundMessage) -> None:
+            received.append(m)
+
+        bus.set_inbound_hook(hook)
+
+        msg = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="hi")
+        await bus.publish_inbound(msg)
+
+        assert received == [msg]
+        assert bus.inbound.qsize() == 0
+
+    async def test_set_inbound_hook_none_restores_queue_path(self) -> None:
+        """Clearing the hook restores the asyncio-queue path — lets
+        tests and dynamic reconfiguration back out of durable wiring."""
+        bus = MessageBus()
+        calls: list[InboundMessage] = []
+
+        async def hook(m: InboundMessage) -> None:
+            calls.append(m)
+
+        bus.set_inbound_hook(hook)
+        bus.set_inbound_hook(None)
+
+        msg = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="hi")
+        await bus.publish_inbound(msg)
+
+        assert calls == []
+        assert bus.inbound.qsize() == 1
+
+    async def test_agent_loop_wires_hook_for_durable_executor(self) -> None:
+        """When the executor advertises ``handles_inbound_enqueue=True``,
+        ``AgentLoop.__init__`` installs ``executor.enqueue_inbound`` as
+        the bus's inbound hook. After that, every
+        ``bus.publish_inbound`` goes to the executor instead of the
+        asyncio queue."""
+        from exoclaw.executor import DirectExecutor
+
+        captured: list[InboundMessage] = []
+
+        class DurableExecutor(DirectExecutor):
+            handles_inbound_enqueue: bool = True
+
+            async def enqueue_inbound(self, msg: InboundMessage) -> None:
+                captured.append(msg)
+
+        loop, bus = _make_loop(executor=DurableExecutor())
+
+        msg = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="hi")
+        await bus.publish_inbound(msg)
+
+        assert captured == [msg]
+        assert bus.inbound.qsize() == 0
+        # loop is the object under test — silence the unused-variable lint
+        assert loop is not None
+
+    async def test_agent_loop_skips_wiring_for_pass_through_executor(self) -> None:
+        """A ``DirectExecutor`` (the default) leaves ``set_inbound_hook``
+        unset so the asyncio-queue path keeps working — pre-existing
+        deployments that don't use a durable executor are unaffected."""
+        loop, bus = _make_loop()  # default DirectExecutor
+
+        msg = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="hi")
+        await bus.publish_inbound(msg)
+
+        assert bus.inbound.qsize() == 1
+        assert loop is not None
+
+
+# ---------------------------------------------------------------------------
 # on_context_overflow — ContextWindowExceededError recovery
 # ---------------------------------------------------------------------------
 

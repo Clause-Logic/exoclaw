@@ -104,6 +104,24 @@ class AgentLoop:
         self._processing_lock = asyncio.Lock()
         self._current_ctx: ToolContext | None = None  # set before each _run_agent_loop call
 
+        # When the executor opts into durable inbound handoff, wire the
+        # bus so ``publish_inbound`` forwards to ``executor.enqueue_inbound``
+        # synchronously. That closes the crash window between "channel
+        # received the message" and "agent started processing": with a
+        # durable handler the message is journaled before the channel's
+        # publish call returns, so an OOM in that window doesn't lose it.
+        #
+        # ``enqueue_inbound`` isn't on the ``Executor`` Protocol (same
+        # opt-in shape as ``set_prior_source``) — pull it off the
+        # concrete executor with ``getattr``. The ``set_inbound_hook``
+        # lookup is also a ``getattr`` to tolerate bus implementations
+        # that predate the method.
+        if getattr(self._executor, "handles_inbound_enqueue", False):
+            enqueue_inbound = getattr(self._executor, "enqueue_inbound", None)
+            set_hook = getattr(self.bus, "set_inbound_hook", None)
+            if enqueue_inbound is not None and set_hook is not None:
+                set_hook(enqueue_inbound)
+
     def _notify_tools_inbound(self, msg: InboundMessage) -> None:
         """Let tools that care about inbound messages update their state."""
         for tool in self.tools._tools.values():

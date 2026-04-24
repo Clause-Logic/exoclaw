@@ -539,16 +539,25 @@ class AgentLoop:
             from exoclaw.executor import _supports_append as _has_append
 
             prefer_append = _has_append(self.conversation)
-            if prefer_append:
-                # build_prompt returned [prior..., user_message].
+            # Capture everything we need from ``initial`` up front so
+            # the frame can release it before the loop iterations run.
+            # The executor already holds prior via its ``PriorSource``
+            # (phase 2b) — retaining ``initial`` here would duplicate
+            # that content in the frame for the lifetime of the turn
+            # (which can be minutes while tool calls run). Capture
+            # then drop so long-running turns don't keep a copy of
+            # the full prior history resident.
+            user_msg: dict[str, object] | None = initial[-1] if initial else None
+            initial_len = len(initial)
+            del initial
+            if prefer_append and user_msg is not None:
                 # Persist the new user message before the loop runs so a
                 # crash mid-turn still has the user's input on disk.
-                if initial:
-                    await self._executor.append_message(self.conversation, session_id, initial[-1])
+                await self._executor.append_message(self.conversation, session_id, user_msg)
             final_content, _, all_msgs = await self._run_agent_loop(
-                initial, on_progress=on_progress, model=model, session_id=session_id
+                [], on_progress=on_progress, model=model, session_id=session_id
             )
-            new_msgs = all_msgs[len(initial) - 1 :]
+            new_msgs = all_msgs[initial_len - 1 :]
             if prefer_append:
                 await self._executor.post_turn(self.conversation, session_id)
             else:

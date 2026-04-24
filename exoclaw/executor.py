@@ -25,6 +25,25 @@ if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
 
 
+PriorSource = Callable[[], list[dict[str, object]]]
+"""Source for per-turn prior-history messages.
+
+Invoked by ``DirectExecutor.load_messages`` on each iteration. The
+default implementation (installed by ``set_messages``) closes over an
+immutable list; a disk-backed implementation re-reads a JSONL file
+each call so the list is transient rather than heap-resident for the
+whole turn. See ``docs/memory-model.md`` phase 2b.
+"""
+
+
+def _empty_prior_source() -> list[dict[str, object]]:
+    """Default source — returns an empty list. Used before any
+    ``set_messages`` / ``set_prior_source`` call runs, so a premature
+    ``load_messages`` doesn't raise ``LookupError``.
+    """
+    return []
+
+
 def _supports_append(conversation: Conversation) -> TypeGuard[AppendableConversation]:
     """Return True if the Conversation implements ``append`` as a real
     coroutine. Narrows the static type to ``AppendableConversation`` so
@@ -210,7 +229,21 @@ class Executor(Protocol):
         ...
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
-        """Replace the current message list (e.g. after compaction)."""
+        """Replace the current message list (e.g. after compaction).
+
+        Back-compat path — the list is captured in a closure and held
+        alive for the turn. Prefer ``set_prior_source`` when a lazy
+        source (disk read, etc.) is available.
+        """
+        ...
+
+    def set_prior_source(self, source: PriorSource) -> None:
+        """Install a lazy source for prior-history messages.
+
+        Each ``load_messages`` invokes ``source()`` to materialise
+        prior fresh, so the list need not stay heap-resident between
+        LLM iterations. See ``docs/memory-model.md`` phase 2b.
+        """
         ...
 
     async def mint_turn_id(self) -> str:
@@ -267,20 +300,34 @@ class DirectExecutor:
         # Per-instance ContextVars: each executor has its own bindings,
         # and within a single executor each asyncio task has its own
         # view. Two executors in the same task don't share state.
-        self._prior_var: ContextVar[list[dict[str, object]]] = ContextVar(
-            f"exoclaw_executor_prior_{id(self)}"
-        )
+        #
+        # ``_prior_var`` stores a ``PriorSource`` — a callable that
+        # returns the prior-history list — rather than the list itself.
+        # The ``set_messages`` back-compat path captures the list in
+        # a closure (keeps it alive in the Python heap, matching the
+        # old behaviour). A new ``set_prior_source`` call site can
+        # install a closure that reads from disk on demand, letting
+        # prior not be held between LLM iterations. That's phase 2b
+        # of the memory-model doc's plan — see docs/memory-model.md.
+        self._prior_var: ContextVar[PriorSource] = ContextVar(f"exoclaw_executor_prior_{id(self)}")
         self._delta_var: ContextVar[list[dict[str, object]]] = ContextVar(
             f"exoclaw_executor_delta_{id(self)}"
         )
 
-    def _get_prior(self) -> list[dict[str, object]]:
+    def _get_prior_source(self) -> PriorSource:
         try:
             return self._prior_var.get()
         except LookupError:
-            buf: list[dict[str, object]] = []
-            self._prior_var.set(buf)
-            return buf
+            self._prior_var.set(_empty_prior_source)
+            return _empty_prior_source
+
+    def _get_prior(self) -> list[dict[str, object]]:
+        # Invokes the source each call — for the ``set_messages`` path
+        # that's a no-op (closure returns the held list); for a
+        # ``set_prior_source`` disk-backed path it materialises fresh
+        # bytes, which the caller typically drops after a single
+        # ``load_messages`` → ``chat`` cycle.
+        return self._get_prior_source()()
 
     def _get_delta(self) -> list[dict[str, object]]:
         try:
@@ -313,11 +360,35 @@ class DirectExecutor:
         #    whatever grew in delta this turn with the compacted
         #    list. So we clear delta to avoid double-counting.
         #
-        # Fresh list per call — if we reused the prior list object
-        # and just cleared it in place, a peer task that had already
-        # captured a reference via ``load_messages()`` would observe
-        # the mutation. Binding new lists isolates each turn's view.
-        self._prior_var.set(list(messages))
+        # Snapshot + closure: matches pre-refactor semantics. A peer
+        # task that captured ``load_messages`` while ``set_messages``
+        # runs concurrently sees its own snapshot — the snapshot list
+        # is never mutated after the closure captures it.
+        snapshot = list(messages)
+        self.set_prior_source(lambda: snapshot)
+        self._delta_var.set([])
+
+    def set_prior_source(self, source: PriorSource) -> None:
+        """Install a prior-history source. Each ``load_messages`` call
+        invokes ``source()`` to materialise the prior list, then
+        concatenates with the live delta.
+
+        Callers that can read prior from disk (e.g. ``Conversation``
+        impls backed by a JSONL session file) use this to keep prior
+        from staying in the Python heap between LLM iterations —
+        phase 2b of the memory-model doc's three-phase plan.
+
+        ``set_messages`` is the back-compat wrapper that captures a
+        list in a closure; behaviour for existing callers is
+        unchanged. New callers should prefer this method when they
+        have a cheap disk read available.
+
+        Also clears delta for the same reason ``set_messages`` does:
+        sequential turns on the same task share the ContextVar
+        binding, and a stale delta from the previous turn would leak
+        into the new turn's ``load_messages`` return otherwise.
+        """
+        self._prior_var.set(source)
         self._delta_var.set([])
 
     async def chat(

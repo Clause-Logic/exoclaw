@@ -173,14 +173,21 @@ class AgentLoop:
         initial_messages: list[dict[str, object]],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
+        *,
+        session_id: str | None = None,
     ) -> tuple[str | None, list[str], list[dict[str, object]]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages).
 
-        When the Conversation supports ``append`` and the session context
-        is set on ``self._current_ctx``, each new assistant message and
-        tool result is flushed to disk as it's produced — keeps crash
-        recovery from losing mid-turn work, and keeps the in-memory
-        buffer from having to be the sole holder of turn state.
+        When the Conversation supports ``append`` and ``session_id`` is
+        provided, each new assistant message and tool result is flushed
+        to disk as it's produced — keeps crash recovery from losing
+        mid-turn work, and keeps the in-memory buffer from having to
+        be the sole holder of turn state.
+
+        ``session_id`` is keyword-only so test stubs that replace this
+        method with a narrower signature continue to work — callers
+        inside exoclaw always pass it; external stubs keep their
+        existing (initial_messages, on_progress, model) shape.
         """
         self._executor.set_messages(initial_messages)
         iteration = 0
@@ -189,20 +196,18 @@ class AgentLoop:
         effective_model = model or self.model
         from exoclaw.executor import _supports_append as _has_append
 
-        # Reads from the instance context rather than a new kwarg so test
-        # stubs that replace _run_agent_loop with a narrower signature
-        # don't break. Concurrent turns see their own ``_current_ctx``
-        # via the same single-task-per-turn assumption the rest of the
-        # loop already relies on.
-        flush_sid = self._current_ctx.session_key if self._current_ctx else None
-        prefer_append = flush_sid is not None and _has_append(self.conversation)
+        # Flushing decision is fully a function of what was passed in
+        # — no reliance on ``self._current_ctx``, which might be stale
+        # from a prior turn or unset on paths that skip _process_message
+        # (e.g. system-message dispatch). Flagged by PR #26 review.
+        prefer_append = session_id is not None and _has_append(self.conversation)
 
         async def _flush(msg: dict[str, object]) -> None:
-            # ``prefer_append`` implies ``flush_sid`` is str (see the
-            # guard above); repeat the None check inline so the static
-            # type-checker can narrow without a cast.
-            if prefer_append and flush_sid is not None:
-                await self._executor.append_message(self.conversation, flush_sid, msg)
+            # ``prefer_append`` implies ``session_id is not None``;
+            # the explicit ``is not None`` repeat lets the static type
+            # checker narrow ``session_id`` to ``str`` for the call.
+            if prefer_append and session_id is not None:
+                await self._executor.append_message(self.conversation, session_id, msg)
 
         while await self._should_continue(iteration, tools_used):
             iteration += 1
@@ -525,7 +530,7 @@ class AgentLoop:
                 if initial:
                     await self._executor.append_message(self.conversation, session_id, initial[-1])
             final_content, _, all_msgs = await self._run_agent_loop(
-                initial, on_progress=on_progress, model=model
+                initial, on_progress=on_progress, model=model, session_id=session_id
             )
             new_msgs = all_msgs[len(initial) - 1 :]
             if prefer_append:

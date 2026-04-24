@@ -13,9 +13,9 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeGuard, runtime_checkable
 
-from exoclaw.agent.conversation import Conversation
+from exoclaw.agent.conversation import AppendableConversation, Conversation
 from exoclaw.agent.tools.protocol import ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.providers.protocol import LLMProvider
@@ -25,17 +25,22 @@ if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
 
 
-def _supports_append(conversation: object) -> bool:
+def _supports_append(conversation: Conversation) -> TypeGuard[AppendableConversation]:
     """Return True if the Conversation implements ``append`` as a real
-    coroutine. ``hasattr`` would return True for a MagicMock stand-in,
-    so tests that patch Conversation with a plain Mock wouldn't
-    accidentally activate the per-message path.
+    coroutine. Narrows the static type to ``AppendableConversation`` so
+    callers can reach the opt-in methods without a cast.
+
+    ``asyncio.iscoroutinefunction`` rather than ``hasattr`` — a
+    ``MagicMock`` stand-in has every attribute, and we don't want the
+    many tests that patch Conversation with a plain Mock to
+    accidentally activate the per-message path and then crash on an
+    ``await`` of a non-coroutine.
     """
     fn = getattr(conversation, "append", None)
     return asyncio.iscoroutinefunction(fn)
 
 
-def _supports_post_turn(conversation: object) -> bool:
+def _supports_post_turn(conversation: Conversation) -> TypeGuard[AppendableConversation]:
     fn = getattr(conversation, "post_turn", None)
     return asyncio.iscoroutinefunction(fn)
 

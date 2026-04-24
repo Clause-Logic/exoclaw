@@ -133,6 +133,7 @@ def _make_loop(executor: DirectExecutor) -> AgentLoop:
         initial: list[dict[str, object]],
         on_progress: object = None,
         model: str | None = None,
+        **_kwargs: object,
     ) -> tuple[str, list[str], list[dict[str, object]]]:
         return ("response", [], list(initial))
 
@@ -153,6 +154,7 @@ class TestTurnContextBinding:
             _initial: list[dict[str, object]],
             on_progress: object = None,
             model: str | None = None,
+            **_kwargs: object,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             captured.update(structlog.contextvars.get_contextvars())
             return ("response", [], [{"role": "system", "content": "ctx"}])
@@ -237,6 +239,7 @@ class TestTurnContextBinding:
             _initial: list[dict[str, object]],
             on_progress: object = None,
             model: str | None = None,
+            **_kwargs: object,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             seen["outer"] = dict(structlog.contextvars.get_contextvars())
             # Re-enter the loop as if a subagent is handling a nested turn.
@@ -252,6 +255,7 @@ class TestTurnContextBinding:
             _initial: list[dict[str, object]],
             on_progress: object = None,
             model: str | None = None,
+            **_kwargs: object,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             seen["inner"] = dict(structlog.contextvars.get_contextvars())
             return ("inner_resp", [], [{"role": "system", "content": "ctx"}])
@@ -328,6 +332,7 @@ class TestProcessMessagePreservesOuterTurnContext:
             _initial: list[dict[str, object]],
             on_progress: object = None,
             model: str | None = None,
+            **_kwargs: object,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             inside_turn.update(structlog.contextvars.get_contextvars())
             return ("response", [], [{"role": "system", "content": "ctx"}])
@@ -397,6 +402,7 @@ class TestProcessMessagePreservesOuterTurnContext:
             _initial: list[dict[str, object]],
             on_progress: object = None,
             model: str | None = None,
+            **_kwargs: object,
         ) -> tuple[str, list[str], list[dict[str, object]]]:
             inside_turn.update(structlog.contextvars.get_contextvars())
             return ("response", [], [{"role": "system", "content": "ctx"}])

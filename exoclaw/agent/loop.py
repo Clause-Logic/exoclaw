@@ -173,13 +173,41 @@ class AgentLoop:
         initial_messages: list[dict[str, object]],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
+        *,
+        session_id: str | None = None,
     ) -> tuple[str | None, list[str], list[dict[str, object]]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
+        """Run the agent iteration loop. Returns (final_content, tools_used, messages).
+
+        When the Conversation supports ``append`` and ``session_id`` is
+        provided, each new assistant message and tool result is flushed
+        to disk as it's produced — keeps crash recovery from losing
+        mid-turn work, and keeps the in-memory buffer from having to
+        be the sole holder of turn state.
+
+        ``session_id`` is keyword-only so test stubs that replace this
+        method with a narrower signature continue to work — callers
+        inside exoclaw always pass it; external stubs keep their
+        existing (initial_messages, on_progress, model) shape.
+        """
         self._executor.set_messages(initial_messages)
         iteration = 0
         final_content = None
         tools_used: list[str] = []
         effective_model = model or self.model
+        from exoclaw.executor import _supports_append as _has_append
+
+        # Flushing decision is fully a function of what was passed in
+        # — no reliance on ``self._current_ctx``, which might be stale
+        # from a prior turn or unset on paths that skip _process_message
+        # (e.g. system-message dispatch). Flagged by PR #26 review.
+        prefer_append = session_id is not None and _has_append(self.conversation)
+
+        async def _flush(msg: dict[str, object]) -> None:
+            # ``prefer_append`` implies ``session_id is not None``;
+            # the explicit ``is not None`` repeat lets the static type
+            # checker narrow ``session_id`` to ``str`` for the call.
+            if prefer_append and session_id is not None:
+                await self._executor.append_message(self.conversation, session_id, msg)
 
         while await self._should_continue(iteration, tools_used):
             iteration += 1
@@ -242,6 +270,7 @@ class AgentLoop:
                 if response.thinking_blocks:
                     msg["thinking_blocks"] = response.thinking_blocks
                 self._executor.append_messages([msg])
+                await _flush(msg)
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
@@ -326,16 +355,14 @@ class AgentLoop:
                             self._log.info("tool_result", **stop_kwargs)
                     if self._on_tool_result:
                         await self._executor.run_hook(self._on_tool_result, tool_call, result)
-                    self._executor.append_messages(
-                        [
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "name": tool_call.name,
-                                "content": result,
-                            },
-                        ]
-                    )
+                    tool_msg: dict[str, object] = {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.name,
+                        "content": result,
+                    }
+                    self._executor.append_messages([tool_msg])
+                    await _flush(tool_msg)
             else:
                 clean = self._strip_think(response.content)
                 if response.finish_reason == "error":
@@ -348,6 +375,7 @@ class AgentLoop:
                 if response.thinking_blocks:
                     msg2["thinking_blocks"] = response.thinking_blocks
                 self._executor.append_messages([msg2])
+                await _flush(msg2)
                 final_content = clean
                 break
 
@@ -486,11 +514,29 @@ class AgentLoop:
                 plugin_context=plugin_context,
                 **kwargs,
             )
+            # Per-message persistence path. When the Conversation impl
+            # supports ``append``, the loop flushes each message as it's
+            # produced (see _run_agent_loop); the final post_turn fires
+            # end-of-turn hooks. Falls back to the legacy batched
+            # ``record`` call for implementations that don't support
+            # append.
+            from exoclaw.executor import _supports_append as _has_append
+
+            prefer_append = _has_append(self.conversation)
+            if prefer_append:
+                # build_prompt returned [prior..., user_message].
+                # Persist the new user message before the loop runs so a
+                # crash mid-turn still has the user's input on disk.
+                if initial:
+                    await self._executor.append_message(self.conversation, session_id, initial[-1])
             final_content, _, all_msgs = await self._run_agent_loop(
-                initial, on_progress=on_progress, model=model
+                initial, on_progress=on_progress, model=model, session_id=session_id
             )
             new_msgs = all_msgs[len(initial) - 1 :]
-            await self._executor.record(self.conversation, session_id, new_msgs)
+            if prefer_append:
+                await self._executor.post_turn(self.conversation, session_id)
+            else:
+                await self._executor.record(self.conversation, session_id, new_msgs)
             return final_content, new_msgs
         finally:
             self._log.info(

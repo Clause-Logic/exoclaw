@@ -644,3 +644,136 @@ class TestDispatch:
         # No message should be on the bus
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(bus.consume_outbound(), timeout=0.1)
+
+
+# ---------------------------------------------------------------------------
+# Per-message persistence path (Conversation.append)
+# ---------------------------------------------------------------------------
+
+
+def _tool_call_response(call_id: str = "tc1") -> MagicMock:
+    """Assistant response that triggers one tool call."""
+    tc = MagicMock()
+    tc.id = call_id
+    tc.name = "t1"
+    tc.arguments = {"x": 1}
+    r = _make_response(content="calling tool", has_tool_calls=True)
+    r.tool_calls = [tc]
+    return r
+
+
+class TestPerMessagePersistence:
+    """When the Conversation exposes ``append`` as a real coroutine, the
+    loop flushes each assistant / tool / user message as it's produced
+    — not batched at end-of-turn ``record``. Backwards compat: if no
+    ``append`` is wired up, the legacy ``record(delta)`` path fires.
+
+    This is the behaviour added for the 2026-04-23 OOM fix (exoclaw
+    memory-model doc, phase 1): prevents the per-turn message buffer
+    from being the sole holder of turn state for a whole turn.
+    """
+
+    def _make_append_loop(self) -> tuple[AgentLoop, MagicMock]:
+        """AgentLoop with a Conversation whose append/post_turn/record
+        are all ``AsyncMock`` so we can assert on them.
+
+        AsyncMock is a coroutine function per
+        ``asyncio.iscoroutinefunction``, so the loop's ``_has_append``
+        check activates the per-message path — same as a real impl.
+        """
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        conversation = MagicMock()
+        conversation.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
+        conversation.append = AsyncMock()
+        conversation.post_turn = AsyncMock()
+        conversation.record = AsyncMock()
+        conversation.clear = AsyncMock(return_value=True)
+        loop = AgentLoop(bus=bus, provider=provider, conversation=conversation)
+        # Register the tool the assistant will call. ``sent_in_turn`` is
+        # explicitly False — leaving it as the MagicMock default truthy
+        # value would trick process_direct into thinking the tool
+        # already replied and swallow the final response.
+        tool = MagicMock()
+        tool.name = "t1"
+        tool.sent_in_turn = False
+        tool.get_definition = MagicMock(
+            return_value={"type": "function", "function": {"name": "t1"}}
+        )
+        tool.execute_with_context = AsyncMock(return_value="tool output")
+        tool.execute = AsyncMock(return_value="tool output")
+        loop.tools._tools["t1"] = tool
+        return loop, conversation
+
+    async def test_append_called_for_user_and_assistant_and_tool(self) -> None:
+        """One turn with one tool call should produce four ``append`` calls
+        in order: user message, assistant-with-tool-call, tool result,
+        final assistant response."""
+        loop, conv = self._make_append_loop()
+        # Two LLM responses: first triggers the tool, second is the final answer.
+        loop.provider.chat = AsyncMock(
+            side_effect=[_tool_call_response(), _make_response(content="done")]
+        )
+
+        result = await loop.process_direct("hello")
+        assert result == "done"
+
+        # Four appends in order.
+        roles = [call.args[1]["role"] for call in conv.append.call_args_list]
+        assert roles == ["user", "assistant", "tool", "assistant"], (
+            f"expected user→assistant→tool→assistant, got {roles}"
+        )
+        # Session id threaded through to every append call.
+        sids = {call.args[0] for call in conv.append.call_args_list}
+        assert sids == {"cli:direct"}
+
+    async def test_post_turn_fires_and_record_does_not(self) -> None:
+        """When the append path is active, ``post_turn`` runs once at
+        end-of-turn and the legacy ``record`` persistence is skipped
+        entirely — we don't want to double-write the same messages."""
+        loop, conv = self._make_append_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
+
+        await loop.process_direct("hi")
+
+        conv.post_turn.assert_awaited_once_with("cli:direct")
+        conv.record.assert_not_called()
+
+    async def test_legacy_record_path_when_no_append(self) -> None:
+        """Conversation implementations that predate ``append`` still work
+        — the loop falls back to ``record(delta)`` at end-of-turn."""
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        provider.chat = AsyncMock(return_value=_make_response(content="ok"))
+
+        class _LegacyConversation:
+            """No ``append`` or ``post_turn`` — legacy protocol only."""
+
+            def __init__(self) -> None:
+                self.recorded: list[list[dict[str, object]]] = []
+
+            async def build_prompt(
+                self, session_id: str, message: str, **kw: object
+            ) -> list[dict[str, object]]:
+                return [{"role": "user", "content": message}]
+
+            async def record(self, session_id: str, new_messages: list[dict[str, object]]) -> None:
+                self.recorded.append(new_messages)
+
+            async def clear(self, session_id: str) -> bool:
+                return True
+
+            def list_sessions(self) -> list[dict[str, object]]:
+                return []
+
+        conv = _LegacyConversation()
+        loop = AgentLoop(bus=bus, provider=provider, conversation=conv)
+
+        await loop.process_direct("hi")
+
+        assert len(conv.recorded) == 1, "legacy record must fire exactly once per turn"
+        # Delta should include the user message + the assistant response.
+        roles = [m["role"] for m in conv.recorded[0]]
+        assert roles == ["user", "assistant"], f"unexpected delta shape: {roles}"

@@ -729,6 +729,60 @@ class TestExecutorOwnsInboundEnqueue:
         assert bus.inbound.qsize() == 1
         assert loop is not None
 
+    async def test_agent_loop_raises_when_opted_in_but_enqueue_missing(self) -> None:
+        """An executor that advertises ``handles_inbound_enqueue=True``
+        but doesn't implement ``enqueue_inbound`` should fail loud at
+        construction — silent fallback would re-open the durability
+        gap the opt-in is meant to close."""
+        from exoclaw.executor import DirectExecutor
+
+        class BrokenExecutor(DirectExecutor):
+            handles_inbound_enqueue: bool = True
+            # Deliberately no ``enqueue_inbound`` method.
+
+        try:
+            _make_loop(executor=BrokenExecutor())
+        except TypeError as exc:
+            assert "enqueue_inbound" in str(exc)
+        else:
+            raise AssertionError("expected TypeError")
+
+    async def test_agent_loop_raises_when_opted_in_but_bus_cant_hook(self) -> None:
+        """An executor opts in, but the bus doesn't implement
+        ``set_inbound_hook`` (e.g. a third-party bus). Fail loud — the
+        executor believes it has a durable path it doesn't actually have."""
+        from exoclaw.executor import DirectExecutor
+
+        class DurableExecutor(DirectExecutor):
+            handles_inbound_enqueue: bool = True
+
+            async def enqueue_inbound(self, msg: InboundMessage) -> None:
+                pass
+
+        class HookLessBus(MessageBus):
+            set_inbound_hook = None  # type: ignore[assignment]
+
+        bus = HookLessBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        provider.chat = AsyncMock(return_value=_make_response())
+        conversation = MagicMock()
+        conversation.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
+        conversation.record = AsyncMock()
+        conversation.clear = AsyncMock(return_value=True)
+
+        try:
+            AgentLoop(
+                bus=bus,
+                provider=provider,
+                conversation=conversation,
+                executor=DurableExecutor(),
+            )
+        except TypeError as exc:
+            assert "set_inbound_hook" in str(exc)
+        else:
+            raise AssertionError("expected TypeError")
+
 
 # ---------------------------------------------------------------------------
 # on_context_overflow — ContextWindowExceededError recovery

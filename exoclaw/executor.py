@@ -234,55 +234,88 @@ class Executor(Protocol):
 class DirectExecutor:
     """Pass-through executor — calls everything inline.
 
-    The per-turn message buffer is backed by a ContextVar owned by each
-    executor instance. Concurrent turns running through the same executor
-    (e.g. a periodic background task firing while a user-initiated turn
-    is in flight) each see their own list: ``asyncio.create_task()``
-    snapshots the current context, so each turn's call chain starts with
-    an independent binding.
+    The per-turn message buffer is split into two ContextVars:
 
-    The ContextVar is per-instance rather than module-level so that two
-    ``DirectExecutor()`` objects constructed in the same task — unusual
-    in production (the executor is a singleton) but common in tests —
-    don't share state with each other.
+    * ``_prior_var`` holds messages the turn inherits from prior
+      conversation history (what ``build_prompt`` returns). Set once
+      at turn start via ``set_messages`` and never mutated during the
+      turn. Compaction replaces it wholesale.
+    * ``_delta_var`` holds messages produced during the current turn.
+      ``append_messages`` extends it; ``load_messages`` concatenates
+      prior + delta for the LLM request body.
 
-    A plain instance attribute here would be a silent concurrency bug:
-    two turns entering ``_run_agent_loop`` would share the same list,
-    trampling each other's history, cross-contaminating LLM context,
-    and eventually writing each other's messages into the wrong session.
+    This split is phase 2a of the memory-model doc's three-phase plan
+    (see exoclaw/docs/memory-model.md). The structural boundary lets
+    phase 2b stop holding prior as a Python list — future versions
+    read prior from the session JSONL on demand instead. Phase 2a
+    alone doesn't save RAM but establishes the invariant that prior
+    is read-only mid-turn and doesn't need to be part of
+    ``append_messages``' mutation path.
+
+    Concurrency: both ContextVars are per-executor-instance, per-task.
+    A module-level or plain-instance-attr buffer would let two
+    concurrent turns trample each other (e.g. a cron firing while a
+    user-initiated turn is in flight). asyncio.create_task snapshots
+    the current context, so each turn's call chain starts with an
+    independent binding on both vars.
     """
 
     # Pass-through executor does not publish — leaves that to the caller.
     handles_response_send: bool = False
 
     def __init__(self) -> None:
-        # Per-instance ContextVar: each executor has its own binding, and
-        # within a single executor each asyncio task has its own view.
-        self._messages_var: ContextVar[list[dict[str, object]]] = ContextVar(
-            f"exoclaw_executor_messages_{id(self)}"
+        # Per-instance ContextVars: each executor has its own bindings,
+        # and within a single executor each asyncio task has its own
+        # view. Two executors in the same task don't share state.
+        self._prior_var: ContextVar[list[dict[str, object]]] = ContextVar(
+            f"exoclaw_executor_prior_{id(self)}"
+        )
+        self._delta_var: ContextVar[list[dict[str, object]]] = ContextVar(
+            f"exoclaw_executor_delta_{id(self)}"
         )
 
-    def _get_buffer(self) -> list[dict[str, object]]:
+    def _get_prior(self) -> list[dict[str, object]]:
         try:
-            return self._messages_var.get()
+            return self._prior_var.get()
         except LookupError:
             buf: list[dict[str, object]] = []
-            self._messages_var.set(buf)
+            self._prior_var.set(buf)
+            return buf
+
+    def _get_delta(self) -> list[dict[str, object]]:
+        try:
+            return self._delta_var.get()
+        except LookupError:
+            buf: list[dict[str, object]] = []
+            self._delta_var.set(buf)
             return buf
 
     def append_messages(self, messages: list[dict[str, object]]) -> None:
-        self._get_buffer().extend(messages)
+        self._get_delta().extend(messages)
 
     def load_messages(self) -> list[dict[str, object]]:
-        return list(self._get_buffer())
+        # Concat into a new list — callers treat the return as
+        # owned (they may pass it to httpx which serialises it, or
+        # mutate it in a compaction callback). Must not be a view
+        # onto prior + delta that would change under their feet if
+        # append_messages runs concurrently.
+        return [*self._get_prior(), *self._get_delta()]
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
-        # Fresh list per call — this is load-bearing for concurrent turns:
-        # if we reused the prior list object and just cleared it in place,
-        # a peer task that had already captured a reference via
-        # ``load_messages()`` would observe the mutation. Binding a new
-        # list isolates each turn's view.
-        self._messages_var.set(list(messages))
+        # Called from two places:
+        # 1. ``build_prompt``, which seeds prior at turn start. There
+        #    is no prior delta to clear — a fresh turn's delta is
+        #    already empty.
+        # 2. The compaction path, which replaces both prior and
+        #    whatever grew in delta this turn with the compacted
+        #    list. So we clear delta to avoid double-counting.
+        #
+        # Fresh list per call — if we reused the prior list object
+        # and just cleared it in place, a peer task that had already
+        # captured a reference via ``load_messages()`` would observe
+        # the mutation. Binding new lists isolates each turn's view.
+        self._prior_var.set(list(messages))
+        self._delta_var.set([])
 
     async def chat(
         self,

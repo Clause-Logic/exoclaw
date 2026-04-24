@@ -152,6 +152,91 @@ class TestDirectExecutorMessageManagement:
         assert [m["content"] for m in results["b"]] == ["b:user", "b:asst"]
 
 
+class TestDirectExecutorPriorDeltaSplit:
+    """Phase 2a invariants: the per-turn buffer is now split into
+    read-only prior + mutable delta. ``load_messages`` concatenates.
+    Tests below pin the internal structure so phase 2b (disk-backed
+    prior) has a known-stable surface to build against.
+    """
+
+    def test_set_seeds_prior_not_delta(self) -> None:
+        """``set_messages`` populates the prior half only. Delta stays
+        empty so ``append_messages`` can't double-count the seeded
+        messages."""
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "system", "content": "sys"}])
+
+        assert executor._get_prior() == [{"role": "system", "content": "sys"}]
+        assert executor._get_delta() == []
+
+    def test_append_grows_delta_not_prior(self) -> None:
+        """``append_messages`` goes to delta. Prior stays exactly as
+        ``set_messages`` left it so compaction / persistence code can
+        rely on prior being read-only mid-turn."""
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "system", "content": "sys"}])
+        executor.append_messages([{"role": "assistant", "content": "ok"}])
+
+        assert executor._get_prior() == [{"role": "system", "content": "sys"}]
+        assert executor._get_delta() == [{"role": "assistant", "content": "ok"}]
+
+    def test_set_clears_delta(self) -> None:
+        """Compaction path: when ``set_messages`` is called mid-turn
+        (e.g. after ContextWindowExceededError), the delta from the
+        pre-compaction iterations must be cleared so the replacement
+        list doesn't get double-counted by the next
+        ``append_messages``."""
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "user", "content": "u"}])
+        executor.append_messages([{"role": "assistant", "content": "a1"}])
+        executor.append_messages([{"role": "tool", "content": "t1"}])
+
+        # Simulate a mid-turn compaction call.
+        executor.set_messages([{"role": "user", "content": "compacted"}])
+
+        assert executor._get_prior() == [{"role": "user", "content": "compacted"}]
+        assert executor._get_delta() == []
+        assert executor.load_messages() == [{"role": "user", "content": "compacted"}]
+
+    def test_load_is_fresh_list_over_prior_and_delta(self) -> None:
+        """``load_messages`` allocates a new list so consumers can
+        mutate the return (e.g. compaction callbacks) without racing
+        with ``append_messages`` on the same shared state."""
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "user", "content": "u"}])
+        executor.append_messages([{"role": "assistant", "content": "a"}])
+
+        a = executor.load_messages()
+        b = executor.load_messages()
+        # Same content, different identity.
+        assert a == b
+        assert a is not b
+
+        # Mutating one return doesn't change prior, delta, or a peer
+        # return.
+        a.append({"role": "tool", "content": "t"})
+        assert len(executor.load_messages()) == 2
+        assert len(executor._get_prior()) == 1
+        assert len(executor._get_delta()) == 1
+
+    def test_append_does_not_copy_prior(self) -> None:
+        """The whole point of the split — ``append_messages`` must
+        not touch the prior-history list. A phase 2b disk-backed
+        prior implementation would pay a file-read every time
+        ``append_messages`` ran if this invariant regressed.
+        """
+        executor = DirectExecutor()
+        executor.set_messages([{"role": "system", "content": "sys"}])
+        prior_ref = executor._get_prior()
+
+        executor.append_messages([{"role": "assistant", "content": "a1"}])
+        executor.append_messages([{"role": "tool", "content": "t1"}])
+
+        # The exact same prior list object is still there, unmodified.
+        assert executor._get_prior() is prior_ref
+        assert prior_ref == [{"role": "system", "content": "sys"}]
+
+
 class TestDirectExecutorBuildPrompt:
     async def test_delegates_to_conversation(self) -> None:
         executor = DirectExecutor()

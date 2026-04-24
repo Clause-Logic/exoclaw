@@ -104,6 +104,50 @@ class AgentLoop:
         self._processing_lock = asyncio.Lock()
         self._current_ctx: ToolContext | None = None  # set before each _run_agent_loop call
 
+        # When the executor opts into durable inbound handoff, wire the
+        # bus so ``publish_inbound`` forwards to ``executor.enqueue_inbound``
+        # synchronously. That closes the crash window between "channel
+        # received the message" and "agent started processing": with a
+        # durable handler the message is journaled before the channel's
+        # publish call returns, so an OOM in that window doesn't lose it.
+        #
+        # ``enqueue_inbound`` isn't on the ``Executor`` Protocol (same
+        # opt-in shape as ``set_prior_source``) — pull it off the
+        # concrete executor with ``getattr``. The ``set_inbound_hook``
+        # lookup is also a ``getattr`` because it lives on the
+        # ``InboundHookBus`` protocol and is only implemented by buses
+        # that support the capability.
+        #
+        # If the executor advertises the flag but either side of the
+        # wiring is missing, raise instead of silently falling back.
+        # A silent fallback re-opens the exact durability gap the
+        # opt-in is supposed to close, so the executor would think it
+        # was durable without any runtime signal that it wasn't.
+        # ``is True`` rather than a truthiness check — ``MagicMock(spec=)``
+        # returns a truthy mock for any spec attribute, which would
+        # silently enable the durable path for any test that uses a
+        # spec'd executor. The opt-in is strictly a boolean toggle, so
+        # require the literal ``True``.
+        if getattr(self._executor, "handles_inbound_enqueue", False) is True:
+            enqueue_inbound = getattr(self._executor, "enqueue_inbound", None)
+            set_hook = getattr(self.bus, "set_inbound_hook", None)
+            missing: list[str] = []
+            if enqueue_inbound is None:
+                missing.append("executor.enqueue_inbound")
+            if set_hook is None:
+                missing.append("bus.set_inbound_hook")
+            if missing or set_hook is None or enqueue_inbound is None:
+                # The ``or`` repeats narrow the unions for ty — the
+                # ``missing`` list already captured the same condition
+                # but the static type checker can't infer that across
+                # two independent ``getattr`` calls.
+                raise TypeError(
+                    "Executor opted into durable inbound enqueue via "
+                    "'handles_inbound_enqueue=True', but required wiring "
+                    f"is missing: {', '.join(missing)}"
+                )
+            set_hook(enqueue_inbound)
+
     def _notify_tools_inbound(self, msg: InboundMessage) -> None:
         """Let tools that care about inbound messages update their state."""
         for tool in self.tools._tools.values():

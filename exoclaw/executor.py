@@ -119,6 +119,21 @@ class Executor(Protocol):
     # the ``OutboundMessage`` and the caller handles the send.
     handles_response_send: bool
 
+    # When True, the executor takes responsibility for persisting each
+    # inbound message the moment a channel hands it over — typically by
+    # starting a durable workflow — and ``AgentLoop`` wires
+    # ``bus.publish_inbound`` to call ``executor.enqueue_inbound``
+    # instead of putting the message on the in-memory asyncio queue.
+    # The point is to close the durability gap between "channel received
+    # the message" and "agent began processing": with a pass-through
+    # executor a container crash in that window loses the message; with
+    # a durable executor the message is journaled before the channel's
+    # publish call returns.
+    #
+    # When False (the default), ``publish_inbound`` uses the asyncio
+    # queue and ``AgentLoop.run`` drains it, as before.
+    handles_inbound_enqueue: bool
+
     async def chat(
         self,
         provider: LLMProvider,
@@ -240,6 +255,13 @@ class Executor(Protocol):
     # themselves; callers that rely on it narrow to the concrete
     # executor type (or ``hasattr``-check) at the call site.
 
+    # NOTE: ``enqueue_inbound`` lives on durable executors as a
+    # concrete method rather than on this Protocol. Same reasoning
+    # as ``set_prior_source`` above — keeping it off the Protocol
+    # avoids a breaking static-typing change for external executors
+    # that don't opt in. Callers (AgentLoop) guard the call with
+    # ``getattr(..., "handles_inbound_enqueue", False)``.
+
     async def mint_turn_id(self) -> str:
         """Produce a replay-safe unique id for one turn.
 
@@ -289,6 +311,11 @@ class DirectExecutor:
 
     # Pass-through executor does not publish — leaves that to the caller.
     handles_response_send: bool = False
+
+    # Pass-through executor has no durable store to put an inbound
+    # message into, so it leaves the bus's asyncio-queue path in place
+    # and ``AgentLoop.run`` drains it.
+    handles_inbound_enqueue: bool = False
 
     def __init__(self) -> None:
         # Per-instance ContextVars: each executor has its own bindings,

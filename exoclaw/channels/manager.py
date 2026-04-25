@@ -10,6 +10,7 @@ from structlog.typing import FilteringBoundLogger
 from exoclaw.bus.events import OutboundMessage
 from exoclaw.bus.protocol import Bus
 from exoclaw.channels.protocol import Channel
+from exoclaw.utils import create_isolated_task
 
 
 class ChannelManager:
@@ -49,10 +50,11 @@ class ChannelManager:
             self._log.warning("no_channels")
             return
 
-        self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
+        self._dispatch_task = create_isolated_task(self._dispatch_outbound())
 
         tasks = [
-            asyncio.create_task(self._start_channel(name, ch)) for name, ch in self.channels.items()
+            create_isolated_task(self._start_channel(name, ch))
+            for name, ch in self.channels.items()
         ]
         self._log.info("channels_start", channels=list(self.channels))
         await asyncio.gather(*tasks, return_exceptions=True)

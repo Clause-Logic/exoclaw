@@ -9,7 +9,7 @@ class TestUtilsModule:
 
         assert hasattr(utils, "__all__")
 
-    def test_all_is_empty_list(self) -> None:
+    def test_all_exposes_create_isolated_task(self) -> None:
         import exoclaw.utils as utils
 
-        assert utils.__all__ == []
+        assert "create_isolated_task" in utils.__all__

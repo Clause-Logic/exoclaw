@@ -29,9 +29,7 @@ class _CorrectTool:
     """Stores destination in a ContextVar — per-task isolation."""
 
     def __init__(self) -> None:
-        self._var: ContextVar[str] = ContextVar(
-            f"correct_tool_{id(self)}", default=""
-        )
+        self._var: ContextVar[str] = ContextVar(f"correct_tool_{id(self)}", default="")
 
     def set(self, value: str) -> None:
         self._var.set(value)
@@ -72,9 +70,7 @@ async def test_helper_accepts_async_setters_and_readers() -> None:
 
     class _AsyncCorrectTool:
         def __init__(self) -> None:
-            self._var: ContextVar[str] = ContextVar(
-                f"async_correct_{id(self)}", default=""
-            )
+            self._var: ContextVar[str] = ContextVar(f"async_correct_{id(self)}", default="")
 
         async def aset(self, value: str) -> None:
             self._var.set(value)

@@ -22,6 +22,7 @@ from exoclaw.executor import DirectExecutor, Executor
 from exoclaw.iteration_policy import IterationPolicy
 from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import ContextWindowExceededError, ToolCallRequest
+from exoclaw.utils import create_isolated_task
 
 _UNSET: object = object()  # sentinel: distinguishes "not provided" from explicit None
 
@@ -625,7 +626,7 @@ class AgentLoop:
                 if msg.content.strip().lower() == "/stop":
                     await self._handle_stop(msg)
                 else:
-                    task = asyncio.create_task(self._dispatch(msg))
+                    task = create_isolated_task(self._dispatch(msg))
                     self._active_tasks.setdefault(msg.session_key, []).append(task)
 
                     def _remove_task(t: asyncio.Task[None], k: str = msg.session_key) -> None:

@@ -59,11 +59,13 @@ ignore = ["E501"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "exoclaw.bus.queue.MessageBus" = {msg = "Use Bus from exoclaw.bus.protocol instead of the concrete MessageBus. Only exoclaw/app.py may import MessageBus as the default implementation."}
+"asyncio.create_task" = {msg = "Use exoclaw.utils.create_isolated_task() instead. asyncio.create_task copies the caller's contextvars, which leaks DBOS workflow context (and structlog / per-turn bindings) into background tasks. The wrapper passes context=contextvars.Context() so each task starts with an empty contextvars snapshot."}
 
 [tool.ruff.lint.per-file-ignores]
 # These files legitimately reference the concrete MessageBus
 "exoclaw/app.py" = ["TID251"]          # provides MessageBus as the default impl
 "exoclaw/bus/__init__.py" = ["TID251"] # re-exports it as part of the bus module
+"exoclaw/utils/tasks.py" = ["TID251"]  # this IS the create_task wrapper
 "tests/*" = ["TID251"]                 # tests use the concrete impl directly
 
 [tool.pytest.ini_options]

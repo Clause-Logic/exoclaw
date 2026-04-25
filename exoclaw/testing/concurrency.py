@@ -18,9 +18,21 @@ deterministic regression check.
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable, TypeVar
+import inspect
+from typing import Awaitable, Callable, TypeVar, cast
 
 _TTool = TypeVar("_TTool")
+_TVal = TypeVar("_TVal")
+
+
+async def _maybe_await(value: Awaitable[_TVal] | _TVal) -> _TVal:
+    """Await value if it's awaitable, otherwise return as-is.
+
+    Uses ``inspect.isawaitable`` so Future / Task / custom awaitables
+    are handled, not just bare coroutines."""
+    if inspect.isawaitable(value):
+        return await cast("Awaitable[_TVal]", value)
+    return cast(_TVal, value)
 
 
 async def assert_set_context_isolates_per_task(
@@ -64,16 +76,14 @@ async def assert_set_context_isolates_per_task(
     tool = make_tool()
     observed: dict[str, str] = {}
 
-    async def _maybe_await(value: object) -> object:
-        if asyncio.iscoroutine(value):
-            return await value
-        return value
-
     async def turn(tag: str) -> None:
         await _maybe_await(set_context(tool, tag))
         # Yield so the other task's set_context can interleave —
         # this is the moment the singleton bug would cross-wire.
-        await asyncio.sleep(0.01)
+        # ``sleep(0)`` is a deterministic zero-duration yield; a fixed
+        # delay would just slow the helper without making the race
+        # any more reliable.
+        await asyncio.sleep(0)
         observed[tag] = await _maybe_await(read_context(tool))
 
     await asyncio.gather(turn("ALPHA"), turn("BRAVO"))

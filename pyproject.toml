@@ -67,6 +67,15 @@ ignore = ["E501"]
 "exoclaw/bus/__init__.py" = ["TID251"] # re-exports it as part of the bus module
 "exoclaw/utils/tasks.py" = ["TID251"]  # this IS the create_task wrapper
 "tests/*" = ["TID251"]                 # tests use the concrete impl directly
+# The compat shim wraps cross-runtime values whose types differ
+# between CPython and MicroPython — ``Any`` is the honest annotation.
+"exoclaw/_compat.py" = ["ANN401"]
+# MicroPython test stubs are intentionally minimal — they exist
+# to satisfy ``import`` calls during the subprocess test, not to
+# fully model CPython's typing surface. The ``N802`` exception
+# covers ``Protocol`` / ``TypeGuard`` which keep their PascalCase
+# to mirror the real typing module's public names.
+"tests/_micropython_stubs/*" = ["ANN", "N802"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

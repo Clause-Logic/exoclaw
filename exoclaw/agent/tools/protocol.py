@@ -50,6 +50,25 @@ class Tool(Protocol):
 
     Use ToolBase as an optional mixin to get
     cast_params / validate_params / to_schema utilities for free.
+
+    **Optional streaming capability** (memory-model.md Step D, opt-in):
+
+    Tools that legitimately produce multi-MB results (web fetches,
+    subprocess output, file reads, large MCP returns) may additionally
+    implement::
+
+        async def execute_streaming(self, **kwargs: object) -> AsyncIterator[str]:
+            ...
+
+    The executor detects the method via ``getattr`` and drains the
+    iterator to a per-turn scratch file as chunks arrive. The tool's
+    result message carries ``_content_file=<path>`` instead of the
+    full content inline; the provider streams from disk into the LLM
+    request body so a fat tool result never materialises as one
+    contiguous Python string. Tools that return small, fixed-size
+    responses keep ``execute`` only and don't pay any of this cost.
+    The two methods are independent — implement either or both. When
+    both are present, ``execute_streaming`` wins.
     """
 
     @property

@@ -18,7 +18,7 @@ from exoclaw.agent.tools.protocol import Tool, ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.bus.events import InboundMessage, OutboundMessage
 from exoclaw.bus.protocol import Bus
-from exoclaw.executor import DirectExecutor, Executor
+from exoclaw.executor import DirectExecutor, Executor, ToolResult
 from exoclaw.iteration_policy import IterationPolicy
 from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import ContextWindowExceededError, ToolCallRequest
@@ -169,6 +169,49 @@ class AgentLoop:
                         "system_context_error", **{"tool.name": getattr(tool, "name", "?")}
                     )
         return ctx
+
+    async def _invoke_tool(self, tool_call: ToolCallRequest) -> tuple[str, object]:
+        """Dispatch the tool, preferring the Step-D-aware
+        ``execute_tool_with_handle`` when the executor has it.
+
+        Step D added an optional ``execute_tool_with_handle`` method to
+        the ``Executor`` Protocol with a default impl. Protocols don't
+        propagate default impls to external implementations though, so
+        ``DBOSExecutor`` and any non-subclass executor (or test mock)
+        won't have the new method until they explicitly add it. Falls
+        back to ``execute_tool`` in that case — same opt-in shape as
+        ``set_prior_source`` / ``handles_inbound_enqueue``.
+
+        Returns ``(content, content_file_path_or_None)``.
+        """
+        new_path = getattr(self._executor, "execute_tool_with_handle", None)
+        if callable(new_path):
+            outcome = await new_path(
+                self.tools,
+                tool_call.name,
+                tool_call.arguments,
+                self._current_ctx,
+                tool_call_id=tool_call.id,
+            )
+            # Strict ``isinstance`` rather than duck-typing the
+            # ``.content`` access. A spec'd ``MagicMock(spec=DirectExecutor)``
+            # auto-resolves ``execute_tool_with_handle`` to an ``AsyncMock``
+            # whose return is a bare ``Mock``; without this guard the loop
+            # would propagate ``Mock`` objects as ``result`` and downstream
+            # log assertions / message-shape checks would fail in
+            # surprising ways. Real implementations return ``ToolResult``;
+            # mocks fall through to the legacy path which the existing
+            # ``execute_tool`` mock setup handles correctly.
+            if isinstance(outcome, ToolResult):
+                return outcome.content, outcome.content_file
+        legacy = await self._executor.execute_tool(
+            self.tools,
+            tool_call.name,
+            tool_call.arguments,
+            self._current_ctx,
+            tool_call_id=tool_call.id,
+        )
+        return legacy, None
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -351,6 +394,13 @@ class AgentLoop:
                     status = "ok"
                     exc: BaseException | None = None
                     result = ""
+                    # When a Step-D-aware tool streamed its result to a
+                    # scratch file, ``content_file`` carries the path so
+                    # the provider can stream from disk into the LLM
+                    # request body. Default ``None`` for tools that
+                    # don't opt in (and for the rejection / exception
+                    # paths that never call the tool at all).
+                    content_file = None
                     try:
                         if self._on_pre_tool:
                             sk = self._current_ctx.session_key if self._current_ctx else ""
@@ -371,22 +421,11 @@ class AgentLoop:
                                     reason=str(rejection)[:100],
                                 )
                                 result = str(rejection)
+                                content_file = None
                             else:
-                                result = await self._executor.execute_tool(
-                                    self.tools,
-                                    tool_call.name,
-                                    tool_call.arguments,
-                                    self._current_ctx,
-                                    tool_call_id=tool_call.id,
-                                )
+                                result, content_file = await self._invoke_tool(tool_call)
                         else:
-                            result = await self._executor.execute_tool(
-                                self.tools,
-                                tool_call.name,
-                                tool_call.arguments,
-                                self._current_ctx,
-                                tool_call_id=tool_call.id,
-                            )
+                            result, content_file = await self._invoke_tool(tool_call)
                     except Exception as e:
                         exc = e
                         status = "error"
@@ -422,6 +461,13 @@ class AgentLoop:
                         "name": tool_call.name,
                         "content": result,
                     }
+                    if content_file is not None:
+                        # Provider reads from disk during request-body
+                        # assembly. The leading underscore signals
+                        # "transport metadata, not part of the LLM
+                        # message" — providers and persistence layers
+                        # strip it before serialising / writing JSONL.
+                        tool_msg["_content_file"] = str(content_file)
                     self._executor.append_messages([tool_msg])
                     await _flush(tool_msg)
             else:

@@ -115,16 +115,10 @@ class ToolRegistry:
         """
         _hint = "\n\n[Analyze the error above and try a different approach.]"
 
-        tool = self._tools.get(name)
-        if not tool:
-            return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
-
-        if hasattr(tool, "cast_params"):
-            params = getattr(tool, "cast_params")(params)
-        if hasattr(tool, "validate_params"):
-            errors: list[str] = getattr(tool, "validate_params")(params)
-            if errors:
-                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
+        resolved = self._resolve(name, params)
+        if isinstance(resolved, str):
+            return resolved
+        tool, params = resolved
 
         token = _dispatch_registry.set(self)
         try:
@@ -138,6 +132,55 @@ class ToolRegistry:
         if isinstance(result, str) and result.startswith("Error"):
             return result + _hint
         return result
+
+    def stream_dispatch(
+        self, name: str, params: dict[str, object]
+    ) -> tuple[Tool, dict[str, object]] | str:
+        """Resolve a streaming tool call without invoking it yet.
+
+        Returns ``(tool, validated_params)`` when the tool exists and
+        implements ``execute_streaming``; returns an error string for
+        unknown tools / invalid params; returns ``None``-equivalent
+        (sentinel via the union: caller checks ``hasattr(tool,
+        'execute_streaming')``) when the tool exists but doesn't opt
+        into streaming. The caller is responsible for binding the
+        dispatch ContextVar around the iteration and for awaiting the
+        async iterator.
+
+        Kept separate from :meth:`execute` because the streaming path
+        is invoked from the executor, not the registry — the executor
+        owns the scratch file lifecycle and needs the iterator to
+        consume chunks one at a time. Doing the streaming dispatch
+        inside the registry would force the registry to know about
+        scratch files, which is the executor's concern.
+        """
+        resolved = self._resolve(name, params)
+        return resolved
+
+    def _resolve(
+        self, name: str, params: dict[str, object]
+    ) -> tuple[Tool, dict[str, object]] | str:
+        """Shared lookup + cast + validate for both execute paths.
+
+        Returns ``(tool, params)`` on success or a ready-to-return
+        error string on failure. Hint suffix is applied in
+        ``execute``; the streaming caller appends its own hint or
+        returns the error inline.
+        """
+        _hint = "\n\n[Analyze the error above and try a different approach.]"
+
+        tool = self._tools.get(name)
+        if not tool:
+            return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
+
+        if hasattr(tool, "cast_params"):
+            params = getattr(tool, "cast_params")(params)
+        if hasattr(tool, "validate_params"):
+            errors: list[str] = getattr(tool, "validate_params")(params)
+            if errors:
+                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
+
+        return tool, params
 
     @classmethod
     def current(cls) -> "ToolRegistry | None":

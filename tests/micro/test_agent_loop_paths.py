@@ -538,6 +538,231 @@ def test_handle_stop_invokes_cancel_by_session_on_tool():
     asyncio.run(_go())
 
 
+def test_system_channel_routes_to_chat_id_subchannel():
+    """An inbound with ``channel="system"`` is the path cron jobs /
+    background workers use to inject a turn. The loop parses the
+    real channel out of ``chat_id`` (``"cli:abc"`` → channel=cli,
+    chat_id=abc) and emits an outbound back on that subchannel."""
+
+    async def _go():
+        bus = MessageBus()
+        loop = AgentLoop(
+            bus=bus,
+            provider=_StubProvider([LLMResponse(content="bg result")]),
+            conversation=_MemConv(),
+        )
+        run_task = asyncio.create_task(loop.run())
+        await asyncio.sleep(0)
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="system",
+                sender_id="cron",
+                chat_id="cli:scheduled-job",
+                content="run the thing",
+            )
+        )
+        out = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
+        # Outbound goes back on the parsed subchannel.
+        assert out.channel == "cli"
+        assert out.chat_id == "scheduled-job"
+        assert out.content == "bg result"
+        # ``session_key`` metadata is set by the system path.
+        assert out.metadata.get("session_key") == "cli:scheduled-job"
+        loop.stop()
+        await run_task
+
+    asyncio.run(_go())
+
+
+def test_system_channel_default_subchannel_when_no_colon():
+    """``chat_id`` without a colon falls back to ``cli:`` prefix —
+    same default as the regular CLI path."""
+
+    async def _go():
+        bus = MessageBus()
+        loop = AgentLoop(
+            bus=bus,
+            provider=_StubProvider([LLMResponse(content="ok")]),
+            conversation=_MemConv(),
+        )
+        run_task = asyncio.create_task(loop.run())
+        await asyncio.sleep(0)
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="system",
+                sender_id="bg",
+                chat_id="bare-id",
+                content="do thing",
+            )
+        )
+        out = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
+        assert out.channel == "cli"
+        assert out.chat_id == "bare-id"
+        loop.stop()
+        await run_task
+
+    asyncio.run(_go())
+
+
+def test_on_max_iterations_callback_fires():
+    """When the agent loop hits ``max_iterations`` and a
+    ``ToolContext`` is active, ``on_max_iterations`` is fired with
+    the routing fields. Used by plugins that want to surface
+    "I gave up" telemetry per session."""
+    from exoclaw.providers.types import ToolCallRequest
+
+    seen = []
+
+    async def _on_max(session_key, channel, chat_id):
+        seen.append((session_key, channel, chat_id))
+
+    class _LoopForever:
+        name = "lp"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            return "still going"
+
+    class _AlwaysCall:
+        def get_default_model(self):
+            return "m"
+
+        async def chat(self, messages, tools=None, model=None, **kw):
+            return LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest(id="c", name="lp", arguments={})],
+                finish_reason="tool_calls",
+            )
+
+    async def _go():
+        bus = MessageBus()
+        loop = AgentLoop(
+            bus=bus,
+            provider=_AlwaysCall(),
+            conversation=_MemConv(),
+            tools=[_LoopForever()],
+            max_iterations=2,
+            on_max_iterations=_on_max,
+        )
+        run_task = asyncio.create_task(loop.run())
+        await asyncio.sleep(0)
+        await bus.publish_inbound(
+            InboundMessage(channel="cli", sender_id="u", chat_id="c", content="go")
+        )
+        await asyncio.wait_for(bus.consume_outbound(), timeout=3.0)
+        # ``on_max_iterations`` may run as ``ensure_future`` —
+        # yield enough times to let it settle.
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+        assert len(seen) == 1
+        assert seen[0][1] == "cli"
+        assert seen[0][2] == "c"
+        loop.stop()
+        await run_task
+
+    asyncio.run(_go())
+
+
+def test_thinking_blocks_attached_to_assistant_message():
+    """A provider response with ``thinking_blocks`` (anthropic-style
+    extended thinking) propagates to the persisted assistant message
+    so the next turn's prompt can replay them. Covers the
+    ``msg["thinking_blocks"] = response.thinking_blocks`` branch."""
+
+    async def _go():
+        thinking = [{"type": "thinking", "text": "step-by-step"}]
+        bus = MessageBus()
+        loop = AgentLoop(
+            bus=bus,
+            provider=_StubProvider([LLMResponse(content="answer", thinking_blocks=thinking)]),
+            conversation=_MemConv(),
+        )
+        _content, msgs = await loop.process_turn("s", "ask")
+        asst = [m for m in msgs if m.get("role") == "assistant"]
+        assert asst
+        assert asst[0].get("thinking_blocks") == thinking
+
+    asyncio.run(_go())
+
+
+def test_executor_handles_response_send_returns_none():
+    """If the executor advertises ``handles_response_send=True``, the
+    loop's ``_process_message`` returns ``None`` and ``_dispatch``
+    publishes an empty placeholder for cli channels (avoids a hung
+    CLI prompt). Covers line 766's elif msg.channel == "cli" path."""
+
+    class _SendingExecutor:
+        handles_response_send = True
+        handles_inbound_enqueue = False
+
+        async def mint_turn_id(self):
+            return "id"
+
+        async def run_hook(self, fn, *a, **kw):
+            return await fn(*a, **kw)
+
+        async def run_turn(self, *a, **kw):
+            return None
+
+        async def execute_tool(self, *a, **kw):
+            return ""
+
+        async def execute_tool_with_handle(self, *a, **kw):
+            from exoclaw.executor import ToolResult
+
+            return ToolResult(content="", content_file=None)
+
+        async def chat(self, provider, **kw):
+            return await provider.chat(**kw)
+
+        async def build_prompt(self, conv, sid, msg, **kw):
+            return await conv.build_prompt(sid, msg, **kw)
+
+        async def append_message(self, conv, sid, message):
+            pass
+
+        async def post_turn(self, conv, sid):
+            pass
+
+        async def record(self, conv, sid, msgs):
+            pass
+
+        def load_messages(self):
+            return []
+
+        def append_messages(self, msgs):
+            pass
+
+        def set_messages(self, msgs):
+            pass
+
+        async def clear(self, conv, sid):
+            return True
+
+    async def _go():
+        bus = MessageBus()
+        loop = AgentLoop(
+            bus=bus,
+            provider=_StubProvider([LLMResponse(content="reply")]),
+            conversation=_MemConv(),
+            executor=_SendingExecutor(),
+        )
+        run_task = asyncio.create_task(loop.run())
+        await asyncio.sleep(0)
+        await bus.publish_inbound(
+            InboundMessage(channel="cli", sender_id="u", chat_id="c", content="hi")
+        )
+        # Loop emits empty-content outbound when executor took over the send.
+        out = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
+        # CLI channel always gets an outbound, even if empty — avoids a hung prompt.
+        assert out.channel == "cli"
+        loop.stop()
+        await run_task
+
+    asyncio.run(_go())
+
+
 def test_llm_error_finish_reason_short_circuits():
     """If the provider returns ``finish_reason='error'``, the loop
     treats the response as terminal — emits ``llm_error`` log and

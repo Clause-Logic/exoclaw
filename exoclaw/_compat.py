@@ -101,6 +101,58 @@ def make_lock() -> Any:
 if IS_MICROPYTHON:  # pragma: no cover (cpython)
     _UNSET: Any = object()
 
+    # Per-task storage map: ``{ id(task): { id(var): value } }``.
+    #
+    # MicroPython doesn't ship ``contextvars`` and uasyncio's ``Task``
+    # is a C struct with no place for arbitrary attributes (the
+    # ``data`` slot is reserved for queue-waiting state). The trick:
+    # use ``id(asyncio.current_task())`` as the key into a
+    # module-level dict. Each task sees its own inner dict; concurrent
+    # tasks under the cooperative single-task scheduler get real
+    # per-task isolation.
+    #
+    # Lifecycle: ``utils.tasks.create_isolated_task`` wraps the
+    # caller's coroutine in a finally-block that pops the task's
+    # entry on completion. The ``main`` task started by
+    # ``asyncio.run`` doesn't go through that wrapper but there's
+    # only one of those per process — bounded leak.
+    _task_storage: dict = {}
+
+    def _current_task_dict() -> dict:
+        """Return the per-task value dict, creating if needed.
+
+        Falls back to a single module-level dict when no task is
+        running (e.g. import-time ``set`` calls — exoclaw doesn't
+        have any but a defensive fallback keeps non-task callers
+        from raising ``LookupError``)."""
+        import asyncio as _asyncio
+
+        try:
+            task = _asyncio.current_task()
+        except Exception:
+            task = None
+        if task is None:
+            # Use a sentinel id (0) for the "no task" bucket — keeps
+            # the data structure homogeneous.
+            return _task_storage.setdefault(0, {})
+        return _task_storage.setdefault(id(task), {})
+
+    def _drop_current_task_storage() -> None:
+        """Pop the current task's storage on exit.
+
+        Called by ``utils.tasks.create_isolated_task``'s wrapper in
+        a ``finally`` block, so the task's dict goes away when the
+        task body completes (normal return, exception, or
+        cancellation)."""
+        import asyncio as _asyncio
+
+        try:
+            task = _asyncio.current_task()
+        except Exception:
+            return
+        if task is not None:
+            _task_storage.pop(id(task), None)
+
     class _Token:
         """Reset token. Mirrors the opaque ``contextvars.Token`` shape
         — callers pass it to ``TaskLocal.reset``."""
@@ -112,32 +164,31 @@ if IS_MICROPYTHON:  # pragma: no cover (cpython)
             self.old_value = old_value
 
     class TaskLocal:
-        """Single-task fallback for ``ContextVar``.
+        """Per-task value slot, mirrors ``contextvars.ContextVar``.
 
-        uasyncio runs all tasks on one OS thread with cooperative
-        scheduling; module-level state is safe across awaits as
-        long as no two tasks observe each other's writes between
-        ``set`` and ``reset``. exoclaw's call sites all wrap the
-        ``set`` / ``reset`` pair around a single async-method body
-        (no concurrent writers within one body), so a per-task
-        snapshot isn't needed in practice on micro.
+        Uses ``id(asyncio.current_task())`` as the storage key, so
+        concurrent tasks under uasyncio's cooperative single-task
+        scheduler each see their own value — real isolation, not
+        the module-level "everyone shares" fallback an earlier
+        version of this shim shipped.
 
-        If a future use case needs per-task isolation on micro,
-        switch to a ``dict`` keyed by ``id(uasyncio.current_task())``
-        with explicit cleanup in ``reset``. The ``Token`` interface
-        already supports it.
-        """
+        Cleanup happens at task end via the
+        ``create_isolated_task`` wrapper in ``utils.tasks`` (it
+        calls ``_drop_current_task_storage`` in a ``finally``).
+        Ad-hoc ``asyncio.create_task`` consumers leak; exoclaw's
+        codebase has a banned-import rule that funnels everything
+        through ``create_isolated_task``."""
 
-        __slots__ = ("_name", "_default", "_value")
+        __slots__ = ("_name", "_default")
 
         def __init__(self, name: str, *, default: Any = _UNSET) -> None:
             self._name = name
             self._default = default
-            self._value: Any = _UNSET
 
         def get(self, default: Any = _UNSET) -> Any:
-            if self._value is not _UNSET:
-                return self._value
+            d = _current_task_dict()
+            if id(self) in d:
+                return d[id(self)]
             if default is not _UNSET:
                 return default
             if self._default is not _UNSET:
@@ -145,12 +196,17 @@ if IS_MICROPYTHON:  # pragma: no cover (cpython)
             raise LookupError(self._name)
 
         def set(self, value: Any) -> _Token:
-            old = self._value
-            self._value = value
+            d = _current_task_dict()
+            old = d.get(id(self), _UNSET)
+            d[id(self)] = value
             return _Token(self, old)
 
         def reset(self, token: _Token) -> None:
-            self._value = token.old_value
+            d = _current_task_dict()
+            if token.old_value is _UNSET:
+                d.pop(id(token.var), None)
+            else:
+                d[id(token.var)] = token.old_value
 
 else:  # pragma: no cover (micropython)
     # Re-export the real ContextVar so callers can use the shim
@@ -319,10 +375,11 @@ def open_text_writer(path: str) -> Any:
 class _StubLogger:
     """Minimal ``structlog``-compatible logger for MicroPython.
 
-    Drops contextvars binding (no-op) and serializes one event per
-    call. structured-log consumers downstream can grep the JSON
-    lines just like the real structlog output, minus the
-    contextvars-derived fields.
+    Reads the per-task structlog-contextvars bag at emit time so log
+    lines carry ``turn.id`` / ``session.key`` / etc. just like the
+    CPython structlog path. The per-task isolation comes from
+    ``TaskLocal``'s ``id(asyncio.current_task())`` keying — every
+    concurrent turn writes its own bag without cross-talk.
     """
 
     __slots__ = ("_name",)
@@ -338,6 +395,13 @@ class _StubLogger:
             # in dict literals isn't supported on MicroPython <=1.27.
             # Building via ``dict()`` + update keeps both runtimes happy.
             payload = {"level": level, "event": event, "logger": self._name}
+            # Pull the per-task structlog contextvars bag — these
+            # are the ``turn.id`` / ``session.key`` / ``channel`` /
+            # etc. that ``bind_log_contextvars`` populated. Shipped
+            # under the field names the CPython structlog setup uses,
+            # so a downstream LogsQL query reads the same fields on
+            # both runtimes.
+            payload.update(get_log_contextvars())
             payload.update(fields)
             # ``json.dumps`` on MicroPython doesn't accept
             # ``ensure_ascii``. The default is True (escape non-ASCII)
@@ -511,16 +575,24 @@ def make_async_queue() -> Any:
 # ── Logger contextvars (per-turn binding) ────────────────────────────────────
 
 
+if IS_MICROPYTHON:  # pragma: no cover (cpython)
+    # Sentinel key into the per-task storage dict for the logger
+    # contextvars bag. The bag is a sub-dict; callers bind/unbind
+    # keys via ``bind_log_contextvars`` / ``unbind_log_contextvars``,
+    # and ``_StubLogger._emit`` reads it to enrich log lines.
+    _LOG_CTX_KEY = "__exoclaw_log_ctx__"
+
+
 def get_log_contextvars() -> dict:
     """Return the current per-task structlog contextvars snapshot.
 
-    On CPython delegates to ``structlog.contextvars.get_contextvars``;
-    on MicroPython returns an empty dict (no per-task binding —
-    cooperative single-task model means there's nothing to scope).
-    Callers use this to capture-then-restore around nested binds.
-    """
+    On CPython delegates to ``structlog.contextvars.get_contextvars``.
+    On MicroPython reads the per-task bag in ``_task_storage`` (real
+    per-task isolation now — every concurrent turn gets its own
+    bag, scoped by ``id(asyncio.current_task())``)."""
     if IS_MICROPYTHON:  # pragma: no cover (cpython)
-        return {}
+        d = _current_task_dict()
+        return dict(d.get(_LOG_CTX_KEY, {}))
     try:  # pragma: no cover (micropython)
         import structlog.contextvars as _cv
 
@@ -532,13 +604,17 @@ def get_log_contextvars() -> dict:
 def bind_log_contextvars(**kw: Any) -> None:
     """Bind keys into the current per-task structlog contextvars.
 
-    No-op on MicroPython — there's no contextvars layer to bind into,
-    and the ``_StubLogger`` doesn't carry per-task state. The cost of
-    losing this on micro is observability fields disappear from log
-    lines; the cost of NOT no-op'ing it is a runtime error on every
-    turn. Trade-off matches the scope of the shim.
-    """
+    On MicroPython this writes into the per-task bag — concurrent
+    turns each get their own ``turn.id`` / ``session.key`` /
+    etc. without trampling each other. Same observability story
+    as CPython, just with our hand-rolled context layer."""
     if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        d = _current_task_dict()
+        bag = d.get(_LOG_CTX_KEY)
+        if bag is None:
+            bag = {}
+            d[_LOG_CTX_KEY] = bag
+        bag.update(kw)
         return
     try:  # pragma: no cover (micropython)
         import structlog.contextvars as _cv
@@ -551,9 +627,17 @@ def bind_log_contextvars(**kw: Any) -> None:
 def unbind_log_contextvars(*keys: str) -> None:
     """Unbind keys from the current per-task structlog contextvars.
 
-    No-op on MicroPython — see ``bind_log_contextvars``.
-    """
+    On MicroPython removes from the per-task bag; on CPython
+    delegates to structlog. ``KeyError`` on missing keys is
+    swallowed so partial unbind sets behave the same on both
+    runtimes (matches structlog semantics)."""
     if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        d = _current_task_dict()
+        bag = d.get(_LOG_CTX_KEY)
+        if bag is None:
+            return
+        for k in keys:
+            bag.pop(k, None)
         return
     try:  # pragma: no cover (micropython)
         import structlog.contextvars as _cv

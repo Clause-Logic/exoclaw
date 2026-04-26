@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, Coroutine, cast
 
 from exoclaw._compat import (
     bind_log_contextvars,
@@ -507,8 +507,15 @@ class AgentLoop:
             final_content = await self._build_limit_message(iteration, tools_used)
             if self._on_max_iterations and self._current_ctx:
                 ctx = self._current_ctx
-                asyncio.ensure_future(
-                    self._on_max_iterations(ctx.session_key, ctx.channel, ctx.chat_id)
+                # ``create_isolated_task`` over ``ensure_future`` —
+                # MicroPython's frozen ``asyncio`` doesn't ship
+                # ``ensure_future``. Same fire-and-forget semantics
+                # for the no-await-needed callback case here.
+                create_isolated_task(
+                    cast(
+                        "Coroutine[object, object, None]",
+                        self._on_max_iterations(ctx.session_key, ctx.channel, ctx.chat_id),
+                    )
                 )
 
         return final_content, tools_used, self._executor.load_messages()
@@ -943,7 +950,15 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
         if self._on_post_turn and new_msgs:
-            asyncio.ensure_future(self._on_post_turn(new_msgs, sid, msg.channel, msg.chat_id))
+            # ``create_isolated_task`` over ``ensure_future`` —
+            # MicroPython's frozen ``asyncio`` doesn't ship
+            # ``ensure_future``.
+            create_isolated_task(
+                cast(
+                    "Coroutine[object, object, None]",
+                    self._on_post_turn(new_msgs, sid, msg.channel, msg.chat_id),
+                )
+            )
 
         if publish_response and getattr(self._executor, "handles_response_send", False):
             # Executor took ownership of the send — nothing to return.

@@ -37,14 +37,29 @@ def create_isolated_task(
     unit of work (timer callbacks, background subagents, deferred
     consolidation, etc.).
 
-    On MicroPython, ``uasyncio.create_task`` doesn't accept ``context``
-    or ``name`` kwargs — there's no contextvars layer to isolate, and
-    task naming isn't surfaced. The single-task cooperative model
-    means there's no parent-context leakage to defend against either,
-    so a plain ``create_task`` is functionally equivalent.
+    On MicroPython, ``uasyncio.create_task`` doesn't accept
+    ``context`` or ``name`` kwargs. We wrap the user's coroutine in
+    a ``finally`` that drops the task's per-task storage entry from
+    ``_compat._task_storage`` — that's how the
+    ``id(asyncio.current_task())``-keyed ``TaskLocal`` storage gets
+    cleaned up. Without this wrapper a long-running process would
+    accumulate a stale dict per finished task.
+
+    Inheritance from the parent's contextvar bindings is NOT
+    something the MP path defends against: there's no contextvars
+    layer to leak, and the per-task storage is freshly empty for
+    the new task.
     """
     if IS_MICROPYTHON:  # pragma: no cover (cpython)
-        return asyncio.create_task(coro)
+        from exoclaw._compat import _drop_current_task_storage
+
+        async def _wrapped() -> _T:
+            try:
+                return await coro
+            finally:
+                _drop_current_task_storage()
+
+        return asyncio.create_task(_wrapped())
     import contextvars  # pragma: no cover (micropython)
 
     return asyncio.create_task(  # pragma: no cover (micropython)

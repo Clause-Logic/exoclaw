@@ -258,7 +258,7 @@ class Executor(Protocol):
     # appropriate place to perform the send than the outer agent loop —
     # the core doesn't care why. When False, ``_process_message`` builds
     # the ``OutboundMessage`` and the caller handles the send.
-    handles_response_send: bool
+    handles_response_send: bool  # pragma: no cover (micropython)
 
     # When True, the executor takes responsibility for persisting each
     # inbound message the moment a channel hands it over — typically by
@@ -273,7 +273,7 @@ class Executor(Protocol):
     #
     # When False (the default), ``publish_inbound`` uses the asyncio
     # queue and ``AgentLoop.run`` drains it, as before.
-    handles_inbound_enqueue: bool
+    handles_inbound_enqueue: bool  # pragma: no cover (micropython)
 
     async def chat(
         self,
@@ -704,7 +704,12 @@ class DirectExecutor:
         # it near a filesystem path.
         suffix = ""
         if tool_call_id:
-            safe = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in tool_call_id)[:64]
+            # MP's ``str`` doesn't ship ``isalnum``; combine
+            # ``isalpha()`` + ``isdigit()`` for the same result on
+            # both runtimes.
+            safe = "".join(
+                c if c.isalpha() or c.isdigit() or c in {"-", "_"} else "_" for c in tool_call_id
+            )[:64]
             if safe:
                 suffix = f"-{safe}"
 

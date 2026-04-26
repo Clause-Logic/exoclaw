@@ -338,6 +338,187 @@ def test_streaming_tool_drains_to_scratch_file_on_mp():
     asyncio.run(_go())
 
 
+def test_streaming_tool_call_id_sanitized_in_path():
+    """``tool_call_id`` may contain unsafe path chars when it
+    originates from an LLM/provider. The executor sanitises it
+    before letting it near the filesystem (alnum + ``-`` / ``_``,
+    capped at 64 chars). This test passes a tool_call_id with
+    slashes / dots / null bytes — the resulting scratch-file path
+    contains none of those."""
+    ex = DirectExecutor()
+    reg = ToolRegistry()
+
+    class _S:
+        name = "s"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            return ""
+
+        async def execute_streaming(self, **kw):
+            yield "chunk"
+
+    reg.register(_S())
+
+    async def _go():
+        outcome = await ex.execute_tool_with_handle(
+            reg,
+            "s",
+            {},
+            tool_call_id="../../etc/passwd\x00",
+        )
+        # Path got created, scrubbed of unsafe chars.
+        assert outcome.content_file is not None
+        assert "/etc/passwd" not in outcome.content_file
+        assert "\x00" not in outcome.content_file
+        # Cleanup.
+        import os as _os
+
+        try:
+            _os.remove(outcome.content_file)
+        except OSError:
+            pass
+
+    asyncio.run(_go())
+
+
+def test_streaming_tool_non_string_chunks_coerced():
+    """Tools that yield non-str chunks (numbers, dicts) get
+    ``str(chunk)`` applied before the encode-and-write step. This
+    keeps the executor robust to tools written without strict
+    string-only output discipline."""
+    ex = DirectExecutor()
+    reg = ToolRegistry()
+
+    class _S:
+        name = "s"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            return ""
+
+        async def execute_streaming(self, **kw):
+            yield 42
+            yield {"a": 1}
+
+    reg.register(_S())
+
+    async def _go():
+        outcome = await ex.execute_tool_with_handle(reg, "s", {})
+        assert outcome.content_file is not None
+        with open(outcome.content_file) as fh:
+            written = fh.read()
+        # Both chunks coerced to str and written.
+        assert "42" in written
+        assert "a" in written  # dict's str form contains the key
+        import os as _os
+
+        try:
+            _os.remove(outcome.content_file)
+        except OSError:
+            pass
+
+    asyncio.run(_go())
+
+
+def test_streaming_tool_exception_unlinks_scratch_file():
+    """An exception mid-stream → the executor unlinks the partial
+    scratch file before re-raising. No half-written turds left
+    behind for ``post_turn`` to find."""
+    from exoclaw._compat import path_exists
+
+    ex = DirectExecutor()
+    reg = ToolRegistry()
+
+    class _S:
+        name = "boom"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            return ""
+
+        async def execute_streaming(self, **kw):
+            yield "first chunk"
+            raise RuntimeError("mid-stream failure")
+
+    reg.register(_S())
+
+    async def _go():
+        try:
+            await ex.execute_tool_with_handle(reg, "boom", {})
+        except RuntimeError as e:
+            assert "mid-stream" in str(e)
+        else:
+            raise AssertionError("expected RuntimeError to propagate")
+        # No scratch file leaked. We can't easily get the path
+        # back since the executor unlinked it, but we can verify
+        # via the executor's tracked-paths var that nothing
+        # accumulated (the cleanup ran before append).
+        try:
+            tracked = ex._scratch_paths_var.get()
+        except LookupError:
+            tracked = []
+        assert all(not path_exists(p) for p in tracked)
+
+    asyncio.run(_go())
+
+
+def test_build_prompt_installs_lazy_prior_source_when_loader_is_sync():
+    """When the Conversation exposes a sync ``load_persisted_history``,
+    ``build_prompt`` auto-detects it and installs a disk-backed
+    ``PriorSource`` — phase 2b of memory-model.md. Verifies the
+    auto-wire fires and the lazy source replaces the closure-over-
+    list snapshot."""
+    ex = DirectExecutor()
+
+    class _LazyConv:
+        """Conversation with sync ``load_persisted_history`` — the
+        signal for the executor to install a lazy prior source."""
+
+        def __init__(self):
+            self._prior = [
+                {"role": "user", "content": "old1"},
+                {"role": "assistant", "content": "old1-reply"},
+            ]
+            self.loader_calls = 0
+
+        async def build_prompt(self, sid, message, **kw):
+            return self._prior + [{"role": "user", "content": message}]
+
+        def load_persisted_history(self, sid):
+            self.loader_calls += 1
+            return list(self._prior)
+
+        async def record(self, sid, msgs):
+            pass
+
+        async def clear(self, sid):
+            return True
+
+        def list_sessions(self):
+            return []
+
+    conv = _LazyConv()
+
+    async def _go():
+        # First build_prompt should install a lazy source via
+        # ``_build_lazy_prior_source``.
+        result = await ex.build_prompt(conv, "s", "new")
+        assert len(result) == 3
+        # Loader was called by the lazy-source installer.
+        assert conv.loader_calls >= 1
+        # ``load_messages`` re-reads via the lazy source — calling
+        # again increments the counter.
+        before = conv.loader_calls
+        ex.load_messages()
+        assert conv.loader_calls > before
+
+    asyncio.run(_go())
+
+
 def test_streaming_tool_with_no_yield_does_not_crash():
     """If a tool defines ``execute_streaming`` but as a plain
     ``async def`` (no ``yield`` body), the executor doesn't crash.
@@ -385,29 +566,35 @@ def test_streaming_tool_with_no_yield_does_not_crash():
 
 
 def test_post_turn_cleans_up_scratch_files():
-    """Scratch files registered during the turn (via the streaming
-    path) are unlinked at ``post_turn``. Simulates the cleanup path
-    by directly populating the TaskLocal — the actual streaming
-    path needs ``isasyncgenfunction`` which is stubbed False on MP."""
+    """Scratch files registered during a turn are unlinked at
+    ``post_turn``. The set / get / unlink sequence happens inside
+    the same task (matches production: streaming-tool dispatch
+    populates the TaskLocal mid-turn, ``post_turn`` reads it at
+    end-of-turn, both within ``process_turn``)."""
     from exoclaw._compat import make_scratch_path
 
-    ex = DirectExecutor()
-    # Hand-register scratch paths the same way the streaming path
-    # would. This exercises the cleanup code without needing the
-    # async-gen detection (which is conservative-False on MP).
-    p1 = make_scratch_path(prefix="micro-scratch-", suffix=".txt")
-    p2 = make_scratch_path(prefix="micro-scratch-", suffix=".txt")
-    assert path_exists(p1)
-    assert path_exists(p2)
-    ex._scratch_paths_var.set([p1, p2])
+    paths = []
 
     class _MinimalConv:
         async def record(self, session_id, msgs):
             pass
 
     async def _go():
+        ex = DirectExecutor()
+        # Register inside the task so the per-task TaskLocal storage
+        # is the one ``post_turn`` will read from. CPython's
+        # ContextVar inherits the outer context on ``asyncio.run``;
+        # MP's per-task storage is keyed by ``id(current_task())``
+        # so set + get must happen in the same task.
+        p1 = make_scratch_path(prefix="micro-scratch-", suffix=".txt")
+        p2 = make_scratch_path(prefix="micro-scratch-", suffix=".txt")
+        paths.append(p1)
+        paths.append(p2)
+        assert path_exists(p1)
+        assert path_exists(p2)
+        ex._scratch_paths_var.set([p1, p2])
         await ex.post_turn(_MinimalConv(), "s")
 
     asyncio.run(_go())
-    assert not path_exists(p1), "scratch file p1 should have been removed"
-    assert not path_exists(p2), "scratch file p2 should have been removed"
+    assert not path_exists(paths[0]), "scratch file p1 should have been removed"
+    assert not path_exists(paths[1]), "scratch file p2 should have been removed"

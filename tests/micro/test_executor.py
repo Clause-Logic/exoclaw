@@ -288,6 +288,102 @@ def test_supports_post_turn_returns_false_for_missing_method():
     assert _supports_post_turn(_Empty()) is False
 
 
+def test_streaming_tool_drains_to_scratch_file_on_mp():
+    """The memory-model.md Step D path on MicroPython: a tool with
+    ``execute_streaming`` drains chunks to a per-turn scratch file
+    rather than materialising the full content as one Python
+    string. This is the prerequisite for the ESP32-S3 small-board
+    target — without it, a single fat tool result can blow the box.
+
+    On MP, ``execute_tool_with_handle`` uses **result-based dispatch**
+    (calls the streamer and checks for ``__aiter__``) because
+    ``inspect.isasyncgenfunction`` isn't available — the function
+    object alone can't tell coroutines apart from async generators.
+    """
+    ex = DirectExecutor()
+    reg = ToolRegistry()
+
+    class _StreamingTool:
+        name = "stream"
+        description = "yields chunks"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            raise AssertionError("inline execute should be skipped")
+
+        async def execute_streaming(self, **kw):
+            # Big enough to overflow the 256-byte preview budget so
+            # the truncation footer kicks in.
+            yield "x" * 300
+            yield "y" * 300
+
+    reg.register(_StreamingTool())
+
+    async def _go():
+        outcome = await ex.execute_tool_with_handle(reg, "stream", {})
+        # Streaming path: ``content_file`` is a real path, ``content``
+        # is a preview ending in the size footer.
+        assert outcome.content_file is not None
+        assert path_exists(outcome.content_file)
+        # Read the file and verify the full payload landed.
+        with open(outcome.content_file) as fh:
+            assert fh.read() == "x" * 300 + "y" * 300
+        assert "xxx" in outcome.content
+        assert "streamed 600 bytes" in outcome.content
+        # Cleanup so the test doesn't leak the scratch file.
+        import os as _os
+
+        _os.remove(outcome.content_file)
+
+    asyncio.run(_go())
+
+
+def test_streaming_tool_with_no_yield_does_not_crash():
+    """If a tool defines ``execute_streaming`` but as a plain
+    ``async def`` (no ``yield`` body), the executor doesn't crash.
+
+    On CPython, ``inspect.isasyncgenfunction`` rejects it
+    pre-call and the loop falls to the inline ``execute`` path —
+    ``content == "fallthrough"``.
+
+    On MicroPython, ``async def`` without ``yield`` compiles to a
+    generator that ``for`` iterates as zero elements (MP's coroutine
+    object has ``__next__`` and silently completes). The streaming
+    path drains nothing and returns an empty preview with a
+    scratch file. Neither runtime crashes — that's the contract."""
+    ex = DirectExecutor()
+    reg = ToolRegistry()
+
+    class _MislabeledTool:
+        name = "mislabel"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            return "fallthrough"
+
+        async def execute_streaming(self, **kw):
+            # Plain coroutine, NOT an async generator.
+            return "coroutine-return"
+
+    reg.register(_MislabeledTool())
+
+    async def _go():
+        outcome = await ex.execute_tool_with_handle(reg, "mislabel", {})
+        # Doesn't crash. Either runtime path produces a ToolResult.
+        assert isinstance(outcome.content, str)
+        # Cleanup any scratch file produced on the MP path.
+        if outcome.content_file is not None:
+            import os as _os
+
+            try:
+                _os.remove(outcome.content_file)
+            except OSError:
+                pass
+
+    asyncio.run(_go())
+
+
 def test_post_turn_cleans_up_scratch_files():
     """Scratch files registered during the turn (via the streaming
     path) are unlinked at ``post_turn``. Simulates the cleanup path

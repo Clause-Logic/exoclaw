@@ -703,10 +703,10 @@ class AgentLoop:
                             tasks.remove(t)
 
                     add_cb = getattr(asyncio.Task, "add_done_callback", None)
-                    if add_cb is not None:
+                    if add_cb is not None:  # pragma: no cover (micropython)
                         task = create_isolated_task(self._dispatch(msg))
                         task.add_done_callback(_remove_task)
-                    else:
+                    else:  # pragma: no cover (cpython)
 
                         async def _wrapped(_msg: InboundMessage = msg) -> None:
                             try:

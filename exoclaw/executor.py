@@ -12,8 +12,9 @@ import time
 from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, TypeGuard, runtime_checkable
 
 from exoclaw._compat import (
+    IS_MICROPYTHON,
     TaskLocal,
-    isasyncgenfunction,
+    decode_utf8_lossy,
     iscoroutinefunction,
     make_lock,
     make_scratch_path,
@@ -653,37 +654,56 @@ class DirectExecutor:
         tool, validated = resolved
 
         streamer = getattr(tool, "execute_streaming", None)
-        # Strict ``isasyncgenfunction`` check — a real streaming tool
-        # uses ``async def execute_streaming(...): yield ...`` which
-        # produces an async-generator function. Plain Mock auto-attrs
-        # (``MagicMock(spec=...)``-derived auto-attributes, bare
-        # ``Mock`` ``execute_streaming`` slots in tests) match
-        # ``callable()`` but not this stricter test, so they fall
-        # through to the inline path correctly. Tools that wrap an
-        # async iterator behind an ``async def`` (returning the
-        # iterator without yielding directly) need to add ``yield``
-        # somewhere in the body or convert via a small wrapper —
-        # documented on the ``Tool`` protocol.
-        if not isasyncgenfunction(streamer):
-            # Tool doesn't opt into streaming — inline path.
+        if streamer is None or not callable(streamer):
+            # Tool doesn't expose ``execute_streaming`` — inline path.
             inline = await self.execute_tool(registry, name, params, ctx, tool_call_id=tool_call_id)
             return ToolResult(content=inline, content_file=None)
-        # Past this guard ``streamer`` is the async-generator
-        # function — narrow for the type checker (the shim
-        # ``isasyncgenfunction`` doesn't return a ``TypeGuard``).
-        # Every line below is unreachable on MicroPython —
-        # ``_compat.isasyncgenfunction`` returns False there
-        # (``inspect.co_flags`` introspection isn't reliable across
-        # MP builds), so the guard above always returns. Mark
-        # MP-excluded; CPython tests still cover this path.
-        assert streamer is not None  # pragma: no cover (micropython)
 
-        # ``tool_call_id`` originates outside the executor (LLM /
-        # provider) and may contain path separators or other unusual
-        # bytes. Sanitize aggressively to ASCII alnum + ``-`` / ``_``
-        # and cap at 64 chars before letting it near a filesystem path.
-        suffix = ""  # pragma: no cover (micropython)
-        if tool_call_id:  # pragma: no cover (micropython)
+        # Per-runtime dispatch.
+        #
+        # CPython: ``inspect.isasyncgenfunction`` is the strict
+        # pre-call discriminator. It rejects ``MagicMock(spec=...)``-
+        # derived auto-attrs (a Mock's ``execute_streaming`` slot is
+        # callable but isn't an async generator function), so test
+        # mocks fall through to the inline path correctly. The
+        # streamer result drains via ``async for``.
+        #
+        # MicroPython: ``async def f(): yield ...`` compiles to a
+        # **plain generator** instance — no ``__aiter__`` /
+        # ``__anext__``, and uasyncio's frozen ``asyncio`` doesn't
+        # implement the async-iterator protocol. The
+        # ``execute_streaming`` Tool-protocol contract is the same
+        # source-level shape on both runtimes (``async def`` +
+        # ``yield``), but on MP we drain via plain ``for``. Tool
+        # authors write the same code; the executor adapts at the
+        # iteration site. This is what makes memory-model.md Step D
+        # active on MP — a fat tool result drains to a scratch file
+        # instead of materialising as one Python string.
+        if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+            import inspect as _inspect
+
+            if not _inspect.isasyncgenfunction(streamer):
+                inline = await self.execute_tool(
+                    registry, name, params, ctx, tool_call_id=tool_call_id
+                )
+                return ToolResult(content=inline, content_file=None)
+        try:
+            streamer_result = streamer(**validated)
+        except TypeError as e:  # pragma: no cover (cpython)
+            # Wrong arity / param mismatch — only reachable on MP
+            # (CPython's pre-call check rejected misshapen tools).
+            return ToolResult(
+                content=f"Error executing {name}: {e}",
+                content_file=None,
+            )
+
+        # Streaming path. ``tool_call_id`` originates outside the
+        # executor (LLM / provider) and may contain path separators
+        # or other unusual bytes. Sanitize aggressively to ASCII
+        # alnum + ``-`` / ``_`` and cap at 64 chars before letting
+        # it near a filesystem path.
+        suffix = ""
+        if tool_call_id:
             safe = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in tool_call_id)[:64]
             if safe:
                 suffix = f"-{safe}"
@@ -691,18 +711,16 @@ class DirectExecutor:
         # Drain the async iterator into a per-turn scratch file.
         # The file persists until ``post_turn`` cleans it up; the
         # provider reads from it during request-body assembly.
-        path = make_scratch_path(  # pragma: no cover (micropython)
-            prefix="exoclaw-tool-", suffix=f"{suffix}.txt"
-        )
-        bytes_written = 0  # pragma: no cover (micropython)
+        path = make_scratch_path(prefix="exoclaw-tool-", suffix=f"{suffix}.txt")
+        bytes_written = 0
         # Preview budget is enforced **in bytes**, not characters —
         # ``bytes_written`` accounts in bytes, so mixing the two would
         # let non-ASCII output exceed the cap. ``newline=""`` prevents
         # Windows-style ``\n``→``\r\n`` translation that would also
         # desync byte counts vs. on-disk size.
-        preview_chunks: list[bytes] = []  # pragma: no cover (micropython)
-        preview_budget = 256  # pragma: no cover (micropython)
-        try:  # pragma: no cover (micropython)
+        preview_chunks: list[bytes] = []
+        preview_budget = 256
+        try:
             with open_text_writer(path) as fh:
                 # Bind ``self`` (the registry) into the dispatch
                 # ContextVar for the duration of the stream — fan-out
@@ -710,17 +728,35 @@ class DirectExecutor:
                 # inside ``execute_streaming`` need this exactly the
                 # same way the inline ``execute`` path provides it.
                 with registry.bind_dispatch():
-                    async for chunk in streamer(**validated):
-                        if not isinstance(chunk, str):
-                            chunk = str(chunk)
-                        chunk_bytes = chunk.encode("utf-8")
-                        fh.write(chunk)
-                        bytes_written += len(chunk_bytes)
-                        if preview_budget > 0:
-                            take = min(preview_budget, len(chunk_bytes))
-                            preview_chunks.append(chunk_bytes[:take])
-                            preview_budget -= take
-        except Exception:  # pragma: no cover (micropython)
+                    if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+                        async for chunk in streamer_result:
+                            if not isinstance(chunk, str):
+                                chunk = str(chunk)
+                            chunk_bytes = chunk.encode("utf-8")
+                            fh.write(chunk)
+                            bytes_written += len(chunk_bytes)
+                            if preview_budget > 0:
+                                take = min(preview_budget, len(chunk_bytes))
+                                preview_chunks.append(chunk_bytes[:take])
+                                preview_budget -= take
+                    else:  # pragma: no cover (cpython)
+                        # On MP, ``async def f(): yield ...`` produces a
+                        # plain generator — sync iteration drains it.
+                        # The Tool-protocol surface (``async def +
+                        # yield``) is the same source-level shape on
+                        # both runtimes; what changes is the executor's
+                        # iteration site.
+                        for chunk in streamer_result:
+                            if not isinstance(chunk, str):
+                                chunk = str(chunk)
+                            chunk_bytes = chunk.encode("utf-8")
+                            fh.write(chunk)
+                            bytes_written += len(chunk_bytes)
+                            if preview_budget > 0:
+                                take = min(preview_budget, len(chunk_bytes))
+                                preview_chunks.append(chunk_bytes[:take])
+                                preview_budget -= take
+        except Exception:
             try:
                 os.remove(path)
             except OSError:
@@ -728,23 +764,22 @@ class DirectExecutor:
             raise
 
         # Track for cleanup at ``post_turn``.
-        try:  # pragma: no cover (micropython)
+        try:
             scratch_paths = self._scratch_paths_var.get()
-        except LookupError:  # pragma: no cover (micropython)
+        except LookupError:
             scratch_paths = []
             self._scratch_paths_var.set(scratch_paths)
-        scratch_paths.append(path)  # pragma: no cover (micropython)
+        scratch_paths.append(path)
 
-        # Reassemble preview as text. ``errors="ignore"`` covers the
+        # Reassemble preview as text. ``decode_utf8_lossy`` covers the
         # one edge case where the byte budget cut a multi-byte UTF-8
         # codepoint mid-sequence — the resulting partial bytes are
-        # dropped from the preview rather than crashing the encode.
-        preview = b"".join(preview_chunks).decode(  # pragma: no cover (micropython)
-            "utf-8", errors="ignore"
-        )
-        if bytes_written > len(preview.encode("utf-8")):  # pragma: no cover (micropython)
+        # dropped from the preview rather than crashing the decode
+        # (MP's ``bytes.decode`` doesn't accept ``errors="ignore"``).
+        preview = decode_utf8_lossy(b"".join(preview_chunks))
+        if bytes_written > len(preview.encode("utf-8")):
             preview = f"{preview}…\n[streamed {bytes_written} bytes to {path_basename(path)}]"
-        return ToolResult(content=preview, content_file=path)  # pragma: no cover (micropython)
+        return ToolResult(content=preview, content_file=path)
 
     async def build_prompt(
         self,

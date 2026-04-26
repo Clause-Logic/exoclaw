@@ -183,12 +183,22 @@ if IS_MICROPYTHON:  # pragma: no cover (cpython)
         return getattr(cls, "__name__", "") == "generator"
 
     def isasyncgenfunction(fn: Any) -> bool:
-        """See ``iscoroutinefunction``. Conservative fallback —
-        async generators on MP can't be reliably distinguished from
-        plain coroutines without ``co_flags`` / ``inspect``, so we
-        return ``False`` and the streaming-tool / async-append
-        paths simply don't activate. The inline path is the safe
-        fallback and works on every runtime."""
+        """Conservative ``False`` on MicroPython.
+
+        ``async def`` (coroutine) and ``async def`` with ``yield``
+        (async generator) both compile to ``generator``-class
+        functions on MP, share the same ``__code__`` shape, and
+        have no ``co_flags`` to introspect — there's no static way
+        to tell them apart without calling the function.
+
+        Callers that need MP-side streaming-tool dispatch (the
+        memory-model.md Step D path that makes ESP32-S3 viable)
+        should NOT rely on this shim alone. ``executor.
+        execute_tool_with_handle`` does **result-based dispatch**:
+        call the streamer with validated params, then check whether
+        the result has ``__aiter__`` to know whether to drain to a
+        scratch file or treat the value as a regular coroutine
+        return."""
         return False
 
     def isawaitable(value: Any) -> bool:
@@ -256,6 +266,31 @@ def make_scratch_path(prefix: str = "tmp-", suffix: str = "", dir: str | None = 
     path = base + sep + prefix + rand + suffix  # pragma: no cover (cpython)
     open(path, "w").close()  # pragma: no cover (cpython)
     return path  # pragma: no cover (cpython)
+
+
+def decode_utf8_lossy(data: bytes) -> str:
+    """Decode ``data`` as UTF-8, dropping incomplete multibyte
+    sequences at the tail.
+
+    CPython would do this via ``data.decode("utf-8", errors="ignore")``
+    but MicroPython's ``bytes.decode`` doesn't accept the ``errors``
+    keyword. Implement it by trimming trailing bytes one at a time
+    until the decode succeeds — the only case exoclaw hits is a
+    chunk-boundary cut mid-codepoint at the end of a buffer, and the
+    longest UTF-8 codepoint is 4 bytes, so worst-case we trim 3.
+    """
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        for trim in range(4):
+            try:
+                if trim == 0:
+                    return data.decode("utf-8")
+                return data[:-trim].decode("utf-8")
+            except UnicodeError:
+                continue
+        # All four-byte windows raised — corrupt input. Return what
+        # we can ASCII-decode.
+        return "".join(chr(b) if b < 128 else "?" for b in data)
+    return data.decode("utf-8", errors="ignore")  # pragma: no cover (micropython)
 
 
 def open_text_writer(path: str) -> Any:
@@ -532,6 +567,7 @@ __all__ = [
     "IS_MICROPYTHON",
     "TaskLocal",
     "bind_log_contextvars",
+    "decode_utf8_lossy",
     "get_log_contextvars",
     "get_logger",
     "isasyncgenfunction",

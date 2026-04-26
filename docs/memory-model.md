@@ -178,6 +178,14 @@ installs a disk-backed source by locating the history slice in
 call. An earlier id-based version shipped in 0.13.0 always fell back
 to snapshot mode in production; 0.13.1 fixes that.
 
+`DirectExecutor.build_prompt` gained the same auto-wire in exoclaw
+0.23.0 (the helper `_build_lazy_prior_source` lives in
+`exoclaw.executor` and is shared between executors). Until 0.23.0
+the pass-through executor would always snapshot via `set_messages`,
+so the phase 2b RAM win was DBOS-only — non-DBOS deployments,
+loadtest scripts, and tests using `DirectExecutor` had to call
+`set_prior_source` manually to realise it.
+
 **What it bought, in principle:** the history slice (typically the
 bulk of prompt size) would not be held in `_prior_var` between LLM
 iterations — re-read on demand per `load_messages` call. Combined

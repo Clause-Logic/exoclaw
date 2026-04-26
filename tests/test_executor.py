@@ -465,6 +465,105 @@ class TestDirectExecutorBuildPrompt:
 
         assert executor.load_messages() == msgs
 
+    async def test_build_prompt_installs_lazy_prior_when_loader_present(self) -> None:
+        """When the Conversation exposes a sync ``load_persisted_history``
+        and ``build_prompt``'s return contains it as a contiguous slice,
+        DirectExecutor installs a lazy ``PriorSource`` instead of
+        snapshotting via ``set_messages``. Calls to ``load_messages``
+        then re-invoke the loader so prior isn't heap-resident between
+        LLM iterations. Mirrors DBOSExecutor's auto-wire and is the
+        path that realises memory-model.md Step C against
+        ``streaming_history``-backed Conversations.
+        """
+        executor = DirectExecutor()
+        conversation = MagicMock(spec=["build_prompt", "load_persisted_history"])
+
+        history = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+        prefix = [{"role": "system", "content": "sys"}]
+        suffix = [{"role": "user", "content": "u2"}]
+        full = [*prefix, *history, *suffix]
+        conversation.build_prompt = AsyncMock(return_value=full)
+        # Return fresh dicts on each call — mirrors the real
+        # DefaultConversation.load_persisted_history contract that
+        # _build_lazy_prior_source must match by dict-equality.
+        conversation.load_persisted_history = MagicMock(
+            side_effect=lambda sid: [dict(m) for m in history]
+        )
+
+        result = await executor.build_prompt(conversation, "s:1", "u2")
+
+        assert result is full
+        # Each load_messages call invokes the loader — proves no snapshot.
+        before = conversation.load_persisted_history.call_count
+        a = executor.load_messages()
+        b = executor.load_messages()
+        after = conversation.load_persisted_history.call_count
+        assert after - before == 2
+        assert a == full
+        assert b == full
+
+    async def test_build_prompt_falls_back_to_snapshot_without_loader(self) -> None:
+        """No ``load_persisted_history`` on the Conversation → preserve
+        the legacy ``set_messages`` snapshot path so existing callers
+        and test mocks aren't affected."""
+        executor = DirectExecutor()
+        conversation = MagicMock(spec=["build_prompt"])
+        msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "u"}]
+        conversation.build_prompt = AsyncMock(return_value=msgs)
+
+        await executor.build_prompt(conversation, "s:1", "u")
+
+        # load_messages returns the same content as the seed.
+        assert executor.load_messages() == msgs
+
+    async def test_build_prompt_skips_async_loader(self) -> None:
+        """``load_persisted_history`` must be sync — the lazy source
+        runs from inside the LLM iteration with no await. An async
+        loader is incompatible; fall back to the snapshot path."""
+        executor = DirectExecutor()
+        conversation = MagicMock(spec=["build_prompt", "load_persisted_history"])
+        msgs = [{"role": "user", "content": "u"}]
+        conversation.build_prompt = AsyncMock(return_value=msgs)
+        conversation.load_persisted_history = AsyncMock(return_value=msgs)
+
+        await executor.build_prompt(conversation, "s:1", "u")
+
+        # Async loader is rejected — fell back to set_messages snapshot.
+        # The async mock must NOT have been called (we never enter the
+        # auto-wire branch when the loader is a coroutine function).
+        conversation.load_persisted_history.assert_not_awaited()
+        assert executor.load_messages() == msgs
+
+    async def test_build_prompt_falls_back_when_history_not_contiguous(self) -> None:
+        """If ``load_persisted_history`` returns content that doesn't
+        appear contiguously in the build_prompt output (e.g. a
+        PromptBuilder transformed history items), the lazy source
+        can't be safely constructed — fall back to the snapshot path
+        rather than build a wrong-shape closure.
+        """
+        executor = DirectExecutor()
+        conversation = MagicMock(spec=["build_prompt", "load_persisted_history"])
+        full = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "transformed-u1"},
+            {"role": "user", "content": "u2"},
+        ]
+        conversation.build_prompt = AsyncMock(return_value=full)
+        conversation.load_persisted_history = MagicMock(
+            return_value=[{"role": "user", "content": "u1-original"}]
+        )
+
+        await executor.build_prompt(conversation, "s:1", "u2")
+
+        # Not auto-wired: load_messages returns the snapshot.
+        # Calls beyond the initial detection probe don't fire.
+        assert executor.load_messages() == full
+        # Loader was consulted exactly once during build_prompt.
+        assert conversation.load_persisted_history.call_count == 1
+
 
 class TestDirectExecutorRecord:
     async def test_delegates_to_conversation(self) -> None:

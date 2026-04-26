@@ -581,8 +581,6 @@ class TestDirectExecutorStreamingTool:
 
     async def test_inline_path_when_tool_has_no_execute_streaming(self) -> None:
         """Default behaviour — no opt-in, inline result, no scratch file."""
-        from pathlib import Path
-
         from exoclaw.executor import ToolResult
 
         executor = DirectExecutor()
@@ -603,12 +601,13 @@ class TestDirectExecutorStreamingTool:
         assert isinstance(outcome, ToolResult)
         assert outcome.content == "inline-result"
         assert outcome.content_file is None
-        assert not isinstance(outcome.content_file, Path)
 
     async def test_streaming_drains_chunks_to_scratch_file(self) -> None:
         """Tool with ``execute_streaming`` writes chunks to disk; the
-        returned ``ToolResult`` carries the path."""
-        from pathlib import Path
+        returned ``ToolResult`` carries the path (a string — paths
+        are runtime-portable strings, not ``pathlib.Path``, so this
+        works on MicroPython too)."""
+        import os
 
         executor = DirectExecutor()
         registry = ToolRegistry()
@@ -633,9 +632,10 @@ class TestDirectExecutorStreamingTool:
         outcome = await executor.execute_tool_with_handle(registry, "streamer", {})
 
         assert outcome.content_file is not None
-        assert isinstance(outcome.content_file, Path)
-        assert outcome.content_file.exists()
-        assert outcome.content_file.read_text() == "x" * 300 + "y" * 300
+        assert isinstance(outcome.content_file, str)
+        assert os.path.exists(outcome.content_file)
+        with open(outcome.content_file) as fh:
+            assert fh.read() == "x" * 300 + "y" * 300
         # Preview captures the head + a stream-size footer.
         assert "xxx" in outcome.content
         assert "streamed 600 bytes" in outcome.content
@@ -643,6 +643,8 @@ class TestDirectExecutorStreamingTool:
     async def test_post_turn_cleans_up_scratch_files(self) -> None:
         """Scratch files from streaming tool calls live for the
         duration of the turn and get unlinked at ``post_turn``."""
+        import os
+
         executor = DirectExecutor()
         registry = ToolRegistry()
 
@@ -662,8 +664,8 @@ class TestDirectExecutorStreamingTool:
         # Run twice — both scratch files get registered.
         a = await executor.execute_tool_with_handle(registry, "streamer", {})
         b = await executor.execute_tool_with_handle(registry, "streamer", {})
-        assert a.content_file is not None and a.content_file.exists()
-        assert b.content_file is not None and b.content_file.exists()
+        assert a.content_file is not None and os.path.exists(a.content_file)
+        assert b.content_file is not None and os.path.exists(b.content_file)
         assert a.content_file != b.content_file
 
         # Conversation argument doesn't matter for cleanup — we only
@@ -672,8 +674,8 @@ class TestDirectExecutorStreamingTool:
 
         await executor.post_turn(MagicMock(spec=[]), "session:1")
 
-        assert not a.content_file.exists()
-        assert not b.content_file.exists()
+        assert not os.path.exists(a.content_file)
+        assert not os.path.exists(b.content_file)
 
     async def test_dispatch_registry_bound_during_streaming(self) -> None:
         """Fan-out tools that call ``ToolRegistry.current()`` from

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Required, TypedDict, Union
+from typing import TYPE_CHECKING, Optional, Required, TypedDict, Union
 
 
 class ContextWindowExceededError(Exception):
@@ -40,13 +40,13 @@ class LLMResponse:
 # ---------------------------------------------------------------------------
 
 
-class ResponseFormatText(TypedDict, total=False):
+class ResponseFormatText(TypedDict):
     """Default response format. Used to generate text responses."""
 
     type: Required[str]  # Literal["text"]
 
 
-class JSONSchema(TypedDict, total=False):
+class JSONSchema(TypedDict):
     """Structured Outputs configuration options, including a JSON Schema."""
 
     name: Required[str]
@@ -62,7 +62,7 @@ class JSONSchema(TypedDict, total=False):
     """Whether to enable strict schema adherence."""
 
 
-class ResponseFormatJSONSchema(TypedDict, total=False):
+class ResponseFormatJSONSchema(TypedDict):
     """JSON Schema response format for structured outputs."""
 
     json_schema: Required[JSONSchema]
@@ -71,10 +71,17 @@ class ResponseFormatJSONSchema(TypedDict, total=False):
     type: Required[str]  # Literal["json_schema"]
 
 
-class ResponseFormatJSONObject(TypedDict, total=False):
+class ResponseFormatJSONObject(TypedDict):
     """JSON object response format. Prefer json_schema for models that support it."""
 
     type: Required[str]  # Literal["json_object"]
 
 
-ResponseFormat = Union[ResponseFormatText, ResponseFormatJSONSchema, ResponseFormatJSONObject]
+# ``Union[A, B, C]`` is a runtime subscription — MicroPython 1.27's
+# typing stub doesn't carry full Union machinery, so gate the alias
+# on ``TYPE_CHECKING`` (annotations are strings under ``__future__``
+# so the runtime placeholder is unused).
+if TYPE_CHECKING:
+    ResponseFormat = Union[ResponseFormatText, ResponseFormatJSONSchema, ResponseFormatJSONObject]
+else:
+    ResponseFormat = object

@@ -1,7 +1,6 @@
 """Bus protocol — the only bus surface external code should depend on."""
 
-from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from typing import Awaitable, Callable, Protocol, runtime_checkable
 
 from exoclaw.bus.events import InboundMessage, OutboundMessage
 

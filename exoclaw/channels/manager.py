@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
-import structlog
-from structlog.typing import FilteringBoundLogger
-
+from exoclaw._compat import get_logger
 from exoclaw.bus.events import OutboundMessage
 from exoclaw.bus.protocol import Bus
 from exoclaw.channels.protocol import Channel
@@ -27,13 +26,13 @@ class ChannelManager:
         channels: list[Channel],
         bus: Bus,
         filter_tool_hints: bool = False,
-        logger: FilteringBoundLogger | None = None,
+        logger: Any | None = None,
     ) -> None:
         self.bus = bus
         self.channels: dict[str, Channel] = {ch.name: ch for ch in channels}
         self._dispatch_task: asyncio.Task[None] | None = None
         self._filter_tool_hints = filter_tool_hints
-        self._log: FilteringBoundLogger = logger or structlog.get_logger()
+        self._log: Any = logger or get_logger()
 
     def register(self, channel: Channel) -> None:
         """Register a channel after construction."""

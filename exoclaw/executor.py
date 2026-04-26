@@ -7,19 +7,20 @@ retry strategies, or execution environments).
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 import os
-import secrets
-import tempfile
-import threading
 import time
-from collections.abc import Awaitable, Callable
-from contextvars import ContextVar
 from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeGuard, runtime_checkable
+from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, TypeGuard, runtime_checkable
 
+from exoclaw._compat import (
+    TaskLocal,
+    isasyncgenfunction,
+    iscoroutinefunction,
+    make_lock,
+    make_scratch_path,
+    open_text_writer,
+    random_bytes,
+)
 from exoclaw.agent.conversation import AppendableConversation, Conversation
 from exoclaw.agent.tools.protocol import ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
@@ -48,7 +49,7 @@ class ToolResult:
     """
 
     content: str
-    content_file: Path | None = None
+    content_file: str | None = None
 
 
 if TYPE_CHECKING:
@@ -62,7 +63,18 @@ if TYPE_CHECKING:
 # immutable list; a disk-backed implementation re-reads a JSONL file
 # each call so the list is transient rather than heap-resident for the
 # whole turn. See ``docs/memory-model.md`` phase 2b.
-PriorSource = Callable[[], list[dict[str, object]]]
+#
+# ``Callable[..., list[dict[...]]]`` is a runtime subscription
+# (type alias, not annotation) — MicroPython 1.27 doesn't support
+# ``list[X]`` / ``dict[X, Y]`` parameterization at runtime, only in
+# annotations (which ``__future__.annotations`` makes strings). Gate
+# the real alias on ``TYPE_CHECKING`` so type checkers see it; at
+# runtime ``PriorSource`` is just ``object`` and stringified
+# annotations resolve via the type-checker side.
+if TYPE_CHECKING:
+    PriorSource = Callable[[], list[dict[str, object]]]
+else:
+    PriorSource = object
 
 
 def _empty_prior_source() -> list[dict[str, object]]:
@@ -140,7 +152,10 @@ def _build_lazy_prior_source(
     suffix = list(full[last_idx + 1 :])
 
     def _source() -> list[dict[str, object]]:
-        return [*prefix, *reload_history(), *suffix]
+        # ``[*a, *b, *c]`` list-literal unpacking isn't supported on
+        # MicroPython 1.27 — concatenate explicitly. ``reload_history``
+        # returns a list, so ``+`` works on both runtimes.
+        return prefix + reload_history() + suffix
 
     return _source
 
@@ -157,15 +172,15 @@ def _supports_append(conversation: Conversation) -> TypeGuard[AppendableConversa
     ``await`` of a non-coroutine.
     """
     fn = getattr(conversation, "append", None)
-    return asyncio.iscoroutinefunction(fn)
+    return iscoroutinefunction(fn)
 
 
 def _supports_post_turn(conversation: Conversation) -> TypeGuard[AppendableConversation]:
     fn = getattr(conversation, "post_turn", None)
-    return asyncio.iscoroutinefunction(fn)
+    return iscoroutinefunction(fn)
 
 
-_uuid7_lock = threading.Lock()
+_uuid7_lock = make_lock()
 _uuid7_last_ms = 0
 
 
@@ -192,7 +207,7 @@ def _uuid7() -> str:
         ts_ms = now_ms if now_ms > _uuid7_last_ms else _uuid7_last_ms
         _uuid7_last_ms = ts_ms
 
-    rand = secrets.token_bytes(10)
+    rand = random_bytes(10)
     b = bytearray(16)
     b[0] = (ts_ms >> 40) & 0xFF
     b[1] = (ts_ms >> 32) & 0xFF
@@ -340,7 +355,6 @@ class Executor(Protocol):
     async def run_hook(
         self,
         fn: Callable[..., Awaitable[object]],
-        /,
         *args: object,
         **kwargs: object,
     ) -> object: ...
@@ -457,14 +471,14 @@ class DirectExecutor:
         # install a closure that reads from disk on demand, letting
         # prior not be held between LLM iterations. That's phase 2b
         # of the memory-model doc's plan — see docs/memory-model.md.
-        self._prior_var: ContextVar[PriorSource] = ContextVar(f"exoclaw_executor_prior_{id(self)}")
-        self._delta_var: ContextVar[list[dict[str, object]]] = ContextVar(
+        self._prior_var: TaskLocal[PriorSource] = TaskLocal(f"exoclaw_executor_prior_{id(self)}")
+        self._delta_var: TaskLocal[list[dict[str, object]]] = TaskLocal(
             f"exoclaw_executor_delta_{id(self)}"
         )
         # Per-task list of scratch files written by streaming tool
         # results during this turn. Cleaned up at ``post_turn``.
         # See ``execute_tool_with_handle`` and memory-model.md Step D.
-        self._scratch_paths_var: ContextVar[list[Path]] = ContextVar(
+        self._scratch_paths_var: TaskLocal[list[str]] = TaskLocal(
             f"exoclaw_executor_scratch_{id(self)}"
         )
 
@@ -500,7 +514,9 @@ class DirectExecutor:
         # mutate it in a compaction callback). Must not be a view
         # onto prior + delta that would change under their feet if
         # append_messages runs concurrently.
-        return [*self._get_prior(), *self._get_delta()]
+        # ``+`` rather than ``[*a, *b]`` because PEP 448 list-literal
+        # unpacking isn't supported on MicroPython 1.27.
+        return self._get_prior() + self._get_delta()
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
         # Called from two places:
@@ -625,10 +641,14 @@ class DirectExecutor:
         # iterator without yielding directly) need to add ``yield``
         # somewhere in the body or convert via a small wrapper —
         # documented on the ``Tool`` protocol.
-        if not inspect.isasyncgenfunction(streamer):
+        if not isasyncgenfunction(streamer):
             # Tool doesn't opt into streaming — inline path.
             inline = await self.execute_tool(registry, name, params, ctx, tool_call_id=tool_call_id)
             return ToolResult(content=inline, content_file=None)
+        # Past this guard ``streamer`` is the async-generator
+        # function — narrow for the type checker (the shim
+        # ``isasyncgenfunction`` doesn't return a ``TypeGuard``).
+        assert streamer is not None
 
         # ``tool_call_id`` originates outside the executor (LLM /
         # provider) and may contain path separators or other unusual
@@ -643,8 +663,7 @@ class DirectExecutor:
         # Drain the async iterator into a per-turn scratch file.
         # The file persists until ``post_turn`` cleans it up; the
         # provider reads from it during request-body assembly.
-        fd, path_str = tempfile.mkstemp(prefix="exoclaw-tool-", suffix=f"{suffix}.txt")
-        path = Path(path_str)
+        path = make_scratch_path(prefix="exoclaw-tool-", suffix=f"{suffix}.txt")
         bytes_written = 0
         # Preview budget is enforced **in bytes**, not characters —
         # ``bytes_written`` accounts in bytes, so mixing the two would
@@ -654,7 +673,7 @@ class DirectExecutor:
         preview_chunks: list[bytes] = []
         preview_budget = 256
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            with open_text_writer(path) as fh:
                 # Bind ``self`` (the registry) into the dispatch
                 # ContextVar for the duration of the stream — fan-out
                 # tools that call ``ToolRegistry.current()`` from
@@ -673,7 +692,7 @@ class DirectExecutor:
                             preview_budget -= take
         except Exception:
             try:
-                path.unlink()
+                os.remove(path)
             except OSError:
                 pass
             raise
@@ -692,7 +711,7 @@ class DirectExecutor:
         # dropped from the preview rather than crashing the encode.
         preview = b"".join(preview_chunks).decode("utf-8", errors="ignore")
         if bytes_written > len(preview.encode("utf-8")):
-            preview = f"{preview}…\n[streamed {bytes_written} bytes to {path.name}]"
+            preview = f"{preview}…\n[streamed {bytes_written} bytes to {os.path.basename(path)}]"
         return ToolResult(content=preview, content_file=path)
 
     async def build_prompt(
@@ -732,7 +751,7 @@ class DirectExecutor:
         #     isolated mode dropped it, etc.).
         # See ``docs/memory-model.md`` phase 2b / Step C.
         loader = getattr(conversation, "load_persisted_history", None)
-        if callable(loader) and not asyncio.iscoroutinefunction(loader):
+        if callable(loader) and not iscoroutinefunction(loader):
             history_snapshot = loader(session_id)
             source = _build_lazy_prior_source(
                 full=messages,
@@ -776,7 +795,7 @@ class DirectExecutor:
             scratch_paths = []
         for path in scratch_paths:
             try:
-                path.unlink()
+                os.remove(path)
             except OSError:
                 pass
         if scratch_paths:
@@ -800,7 +819,6 @@ class DirectExecutor:
     async def run_hook(
         self,
         fn: Callable[..., Awaitable[object]],
-        /,
         *args: object,
         **kwargs: object,
     ) -> object:

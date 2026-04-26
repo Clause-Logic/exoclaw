@@ -2,26 +2,53 @@
 
 from __future__ import annotations
 
-import contextlib
-import contextvars
-from collections.abc import Iterator
-
+from exoclaw._compat import TaskLocal
 from exoclaw.agent.tools.protocol import Tool, ToolContext
 
-# ContextVar that carries the *currently-dispatching* ToolRegistry across
-# ``ToolRegistry.execute`` and whatever tool body it invokes. Tools that
-# need to look up sibling tools (``BatchTool``, ``ReduceTool``,
-# fan-out/fan-in patterns) should read this via
-# :meth:`ToolRegistry.current` instead of holding a stored reference via
-# ``set_registry()``: the stored-reference pattern breaks when a single
-# tool instance is shared across multiple ``AgentLoop``s — each loop's
-# constructor overwrites the pointer, so the main agent's tool ends up
-# pointing at the last-constructed subagent's registry. Per-asyncio-task
-# ContextVar isolation fixes that because concurrent dispatches from
-# different loops each see their own registry.
-_dispatch_registry: contextvars.ContextVar["ToolRegistry | None"] = contextvars.ContextVar(
+# Per-task local that carries the *currently-dispatching* ToolRegistry
+# across ``ToolRegistry.execute`` and whatever tool body it invokes.
+# Tools that need to look up sibling tools (``BatchTool``,
+# ``ReduceTool``, fan-out/fan-in patterns) should read this via
+# :meth:`ToolRegistry.current` instead of holding a stored reference
+# via ``set_registry()``: the stored-reference pattern breaks when a
+# single tool instance is shared across multiple ``AgentLoop``s —
+# each loop's constructor overwrites the pointer, so the main agent's
+# tool ends up pointing at the last-constructed subagent's registry.
+# Per-asyncio-task isolation (CPython ``ContextVar``, MicroPython
+# single-task fallback in ``_compat.TaskLocal``) fixes that because
+# concurrent dispatches from different loops each see their own
+# registry on CPython; on MP single-task uasyncio there's only one
+# dispatch in flight at a time so module-level state is safe.
+_dispatch_registry: TaskLocal["ToolRegistry | None"] = TaskLocal(
     "exoclaw.tool_registry.dispatch", default=None
 )
+
+
+class _BindDispatch:
+    """Context manager that binds a ToolRegistry into the dispatch
+    TaskLocal for its body.
+
+    Class-based instead of ``@contextlib.contextmanager`` so the
+    file imports cleanly on MicroPython, which doesn't ship
+    ``contextlib``. The set/reset pair is identical to what the
+    decorator generated — ``set`` returns a token that ``reset``
+    consumes on ``__exit__``.
+    """
+
+    __slots__ = ("_registry", "_token")
+
+    def __init__(self, registry: "ToolRegistry") -> None:
+        self._registry = registry
+        self._token: object | None = None
+
+    def __enter__(self) -> "_BindDispatch":
+        self._token = _dispatch_registry.set(self._registry)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._token is not None:
+            _dispatch_registry.reset(self._token)  # type: ignore[arg-type]
+            self._token = None
 
 
 class ToolRegistry:
@@ -161,10 +188,9 @@ class ToolRegistry:
         """
         return self._resolve(name, params)
 
-    @contextlib.contextmanager
-    def bind_dispatch(self) -> Iterator[None]:
-        """Bind ``self`` into ``_dispatch_registry`` for the body of
-        the context.
+    def bind_dispatch(self) -> "_BindDispatch":
+        """Return a context manager that binds ``self`` into
+        ``_dispatch_registry`` for the body of the ``with`` block.
 
         The streaming executor path bypasses :meth:`execute`, which
         normally sets ``_dispatch_registry`` for the duration of the
@@ -176,11 +202,7 @@ class ToolRegistry:
         nested dispatches compose correctly — same semantics as
         :meth:`execute`'s set/reset pair.
         """
-        token = _dispatch_registry.set(self)
-        try:
-            yield
-        finally:
-            _dispatch_registry.reset(token)
+        return _BindDispatch(self)
 
     def _resolve(
         self, name: str, params: dict[str, object]

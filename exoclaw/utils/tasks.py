@@ -15,8 +15,9 @@ DBOS / structlog / per-turn contextvars.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 from typing import Any, Coroutine, TypeVar
+
+from exoclaw._compat import IS_MICROPYTHON
 
 _T = TypeVar("_T")
 
@@ -35,8 +36,20 @@ def create_isolated_task(
     Use this for any background task that should run as a top-level
     unit of work (timer callbacks, background subagents, deferred
     consolidation, etc.).
+
+    On MicroPython, ``uasyncio.create_task`` doesn't accept ``context``
+    or ``name`` kwargs — there's no contextvars layer to isolate, and
+    task naming isn't surfaced. The single-task cooperative model
+    means there's no parent-context leakage to defend against either,
+    so a plain ``create_task`` is functionally equivalent.
     """
-    return asyncio.create_task(coro, context=contextvars.Context(), name=name)
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        return asyncio.create_task(coro)
+    import contextvars  # pragma: no cover (micropython)
+
+    return asyncio.create_task(  # pragma: no cover (micropython)
+        coro, context=contextvars.Context(), name=name
+    )
 
 
 __all__ = ["create_isolated_task"]

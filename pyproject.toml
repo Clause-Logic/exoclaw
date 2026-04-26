@@ -63,19 +63,27 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 # These files legitimately reference the concrete MessageBus
-"exoclaw/app.py" = ["TID251"]          # provides MessageBus as the default impl
 "exoclaw/bus/__init__.py" = ["TID251"] # re-exports it as part of the bus module
 "exoclaw/utils/tasks.py" = ["TID251"]  # this IS the create_task wrapper
 "tests/*" = ["TID251"]                 # tests use the concrete impl directly
 # The compat shim wraps cross-runtime values whose types differ
 # between CPython and MicroPython — ``Any`` is the honest annotation.
 "exoclaw/_compat.py" = ["ANN401"]
+# Logger parameters use ``Any`` because the runtime logger type
+# differs between CPython (``structlog.FilteringBoundLogger``) and
+# MicroPython (``_compat._StubLogger``) — pinning either is wrong
+# on the other runtime, and the compat shim's contract is shape
+# (``info`` / ``warning`` / ``error`` / ``bind``) not type.
+"exoclaw/app.py" = ["ANN401", "TID251"]
+"exoclaw/agent/loop.py" = ["ANN401"]
+"exoclaw/channels/manager.py" = ["ANN401"]
 # MicroPython test stubs are intentionally minimal — they exist
 # to satisfy ``import`` calls during the subprocess test, not to
-# fully model CPython's typing surface. The ``N802`` exception
-# covers ``Protocol`` / ``TypeGuard`` which keep their PascalCase
-# to mirror the real typing module's public names.
-"tests/_micropython_stubs/*" = ["ANN", "N802"]
+# fully model CPython's typing surface. The class- and method-name
+# ignores cover stdlib mirrors that keep their canonical casing
+# (``datetime`` lowercase, ``__init__`` synthesised inside
+# ``_make_init`` for the dataclasses stub).
+"tests/_micropython_stubs/*" = ["ANN", "N801", "N802", "N807"]
 # The MicroPython runner and the test files it executes run on
 # MicroPython 1.27 — ``typing`` is a stub there and full ANN
 # annotations would just import-fail. Keep them pure-Python.

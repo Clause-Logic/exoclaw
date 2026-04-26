@@ -164,24 +164,47 @@ else:  # pragma: no cover (micropython)
 if IS_MICROPYTHON:  # pragma: no cover (cpython)
 
     def iscoroutinefunction(fn: Any) -> bool:
-        """Conservative MicroPython fallback.
+        """Detect ``async def`` functions on MicroPython.
 
-        ``inspect`` on MicroPython is stub-only and ``co_flags``
-        introspection isn't reliable across builds. Returning
-        ``False`` keeps every opt-in capability detection on the
-        inline path — which is the safe fallback because the
-        inline path is always supported. Streaming-tool / async-
-        append paths just don't activate on micro until/unless a
-        marker-based detection is added.
-        """
-        return False
+        On MP an ``async def`` compiles to a function whose
+        ``__class__.__name__`` is ``"generator"`` (the underlying
+        machinery is generator-based coroutines). Plain ``def``
+        functions are ``"function"``. ``hasattr(__name__)`` guards
+        against builtins / methods that don't expose a ``__class__``
+        with a ``__name__`` — those couldn't be ``async def`` anyway.
+
+        Falls back to ``False`` for non-callables (None passed in
+        from ``getattr(..., default=None)``)."""
+        if fn is None:
+            return False
+        cls = getattr(fn, "__class__", None)
+        if cls is None:
+            return False
+        return getattr(cls, "__name__", "") == "generator"
 
     def isasyncgenfunction(fn: Any) -> bool:
-        """See ``iscoroutinefunction``. Same conservative fallback."""
+        """See ``iscoroutinefunction``. Conservative fallback —
+        async generators on MP can't be reliably distinguished from
+        plain coroutines without ``co_flags`` / ``inspect``, so we
+        return ``False`` and the streaming-tool / async-append
+        paths simply don't activate. The inline path is the safe
+        fallback and works on every runtime."""
         return False
 
+    def isawaitable(value: Any) -> bool:
+        """Check if ``value`` can be ``await``ed.
+
+        ``__await__`` covers PEP 492 awaitables (coroutines, Futures,
+        Tasks, anything with an ``__await__`` method). ``send`` covers
+        the older generator-based coroutines that uasyncio still
+        accepts internally. Together this matches the surface that
+        ``inspect.isawaitable`` tests on CPython for the kinds of
+        objects exoclaw actually passes through.
+        """
+        return hasattr(value, "__await__") or hasattr(value, "send")
+
 else:  # pragma: no cover (micropython)
-    from inspect import isasyncgenfunction, iscoroutinefunction
+    from inspect import isasyncgenfunction, isawaitable, iscoroutinefunction
 
 
 # ── Scratch file paths ───────────────────────────────────────────────────────
@@ -233,6 +256,26 @@ def make_scratch_path(prefix: str = "tmp-", suffix: str = "", dir: str | None = 
     path = base + sep + prefix + rand + suffix  # pragma: no cover (cpython)
     open(path, "w").close()  # pragma: no cover (cpython)
     return path  # pragma: no cover (cpython)
+
+
+def open_text_writer(path: str) -> Any:
+    """Return a writable text-mode file handle for ``path``.
+
+    CPython opens with ``encoding="utf-8"`` + ``newline=""`` to keep
+    byte counts in sync with on-disk size (no Windows CRLF
+    translation). MicroPython's ``open`` doesn't accept those
+    kwargs — its text mode is always UTF-8 and there's no newline
+    translation, so a bare ``open(path, "w")`` matches CPython's
+    explicit semantics on the platforms exoclaw targets.
+
+    Used by the streaming-tool path in ``executor.py`` to drain
+    async-iterator chunks into a per-turn scratch file. Caller
+    closes the handle; ``make_scratch_path`` already created the
+    file as a 0-byte placeholder so this just opens it for write.
+    """
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        return open(path, "w")
+    return open(path, "w", encoding="utf-8", newline="")  # pragma: no cover (micropython)
 
 
 # ── Logger ───────────────────────────────────────────────────────────────────
@@ -305,13 +348,138 @@ def get_logger(name: str = "") -> Any:
         return _StubLogger(name)
 
 
+# ── Async queue (uasyncio fallback for ``asyncio.Queue``) ────────────────────
+
+
+class _AsyncQueue:
+    """Minimal ``asyncio.Queue`` replacement for MicroPython.
+
+    uasyncio doesn't ship ``Queue`` (the unix port's frozen
+    ``asyncio`` build has ``Lock``, ``Event``, ``Task``, ``gather``,
+    ``wait_for``, but no ``Queue``). exoclaw's bus only uses
+    ``put`` / ``get`` so the surface stays tiny — backed by a list
+    and an ``Event`` that ``put`` sets and ``get`` clears when the
+    list empties.
+
+    Cooperative-single-task semantics: there's no preemption point
+    inside ``put`` / ``get`` between checking and mutating the list,
+    so a plain list is safe without a lock.
+    """
+
+    def __init__(self) -> None:
+        self._items: list[Any] = []
+        # Lazy import — module-level import would force every CPython
+        # caller to pay for asyncio import even if they don't use the
+        # queue (and we want this class importable even when asyncio
+        # isn't installed yet during ``import exoclaw._compat``).
+        import asyncio as _asyncio
+
+        self._event = _asyncio.Event()
+
+    def qsize(self) -> int:
+        return len(self._items)
+
+    def empty(self) -> bool:
+        return not self._items
+
+    async def put(self, item: Any) -> None:
+        self._items.append(item)
+        self._event.set()
+
+    def put_nowait(self, item: Any) -> None:
+        self._items.append(item)
+        self._event.set()
+
+    async def get(self) -> Any:
+        while not self._items:
+            await self._event.wait()
+            self._event.clear()
+        return self._items.pop(0)
+
+
+def make_async_queue() -> Any:
+    """Return an ``asyncio.Queue``-shaped object for the running runtime.
+
+    On CPython this is a real ``asyncio.Queue`` (full feature set,
+    backpressure via ``maxsize``, etc.). On MicroPython this is the
+    minimal ``_AsyncQueue`` defined above — same ``put`` / ``get``
+    surface, no ``maxsize`` because exoclaw doesn't use that anywhere.
+    """
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        return _AsyncQueue()
+    import asyncio  # pragma: no cover (micropython)
+
+    return asyncio.Queue()  # pragma: no cover (micropython)
+
+
+# ── Logger contextvars (per-turn binding) ────────────────────────────────────
+
+
+def get_log_contextvars() -> dict:
+    """Return the current per-task structlog contextvars snapshot.
+
+    On CPython delegates to ``structlog.contextvars.get_contextvars``;
+    on MicroPython returns an empty dict (no per-task binding —
+    cooperative single-task model means there's nothing to scope).
+    Callers use this to capture-then-restore around nested binds.
+    """
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        return {}
+    try:  # pragma: no cover (micropython)
+        import structlog.contextvars as _cv
+
+        return dict(_cv.get_contextvars())
+    except ImportError:  # pragma: no cover
+        return {}
+
+
+def bind_log_contextvars(**kw: Any) -> None:
+    """Bind keys into the current per-task structlog contextvars.
+
+    No-op on MicroPython — there's no contextvars layer to bind into,
+    and the ``_StubLogger`` doesn't carry per-task state. The cost of
+    losing this on micro is observability fields disappear from log
+    lines; the cost of NOT no-op'ing it is a runtime error on every
+    turn. Trade-off matches the scope of the shim.
+    """
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        return
+    try:  # pragma: no cover (micropython)
+        import structlog.contextvars as _cv
+
+        _cv.bind_contextvars(**kw)
+    except ImportError:  # pragma: no cover
+        pass
+
+
+def unbind_log_contextvars(*keys: str) -> None:
+    """Unbind keys from the current per-task structlog contextvars.
+
+    No-op on MicroPython — see ``bind_log_contextvars``.
+    """
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        return
+    try:  # pragma: no cover (micropython)
+        import structlog.contextvars as _cv
+
+        _cv.unbind_contextvars(*keys)
+    except ImportError:  # pragma: no cover
+        pass
+
+
 __all__ = [
     "IS_MICROPYTHON",
     "TaskLocal",
+    "bind_log_contextvars",
+    "get_log_contextvars",
     "get_logger",
     "isasyncgenfunction",
+    "isawaitable",
     "iscoroutinefunction",
+    "make_async_queue",
     "make_lock",
     "make_scratch_path",
+    "open_text_writer",
     "random_bytes",
+    "unbind_log_contextvars",
 ]

@@ -6,13 +6,14 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Any, Awaitable, Callable, cast
 
-import structlog
-import structlog.contextvars
-from structlog.typing import FilteringBoundLogger
-
+from exoclaw._compat import (
+    bind_log_contextvars,
+    get_log_contextvars,
+    get_logger,
+    unbind_log_contextvars,
+)
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import Tool, ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
@@ -70,7 +71,7 @@ class AgentLoop:
         | None = None,
         iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
-        logger: FilteringBoundLogger | None = None,
+        logger: Any | None = None,
     ) -> None:
         self.bus = bus
         self._executor: Executor = executor or DirectExecutor()
@@ -99,7 +100,7 @@ class AgentLoop:
                 tool.set_bus(self.bus)  # type: ignore[call-non-callable]
             if hasattr(tool, "set_registry"):
                 tool.set_registry(self.tools)  # type: ignore[call-non-callable]
-        self._log: FilteringBoundLogger = logger or structlog.get_logger()
+        self._log: Any = logger or get_logger()
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task[None]]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
@@ -589,7 +590,7 @@ class AgentLoop:
         before calling ``process_direct``) extend the ancestry correctly.
         """
         turn_id = await self._executor.mint_turn_id()
-        ctx = structlog.contextvars.get_contextvars()
+        ctx = get_log_contextvars()
         parent_chain = cast(str, ctx.get("turn.chain", "") or "")
         parent_id = ctx.get("turn.id")
         root_id = ctx.get("turn.root_id") or turn_id
@@ -610,7 +611,7 @@ class AgentLoop:
         _sentinel = object()
         prior_turn_ctx = {k: ctx.get(k, _sentinel) for k in _turn_keys}
 
-        structlog.contextvars.bind_contextvars(
+        bind_log_contextvars(
             **{
                 "turn.id": turn_id,
                 "turn.root_id": root_id,
@@ -664,9 +665,9 @@ class AgentLoop:
             to_rebind = {k: v for k, v in prior_turn_ctx.items() if v is not _sentinel}
             to_unbind = tuple(k for k, v in prior_turn_ctx.items() if v is _sentinel)
             if to_unbind:
-                structlog.contextvars.unbind_contextvars(*to_unbind)
+                unbind_log_contextvars(*to_unbind)
             if to_rebind:
-                structlog.contextvars.bind_contextvars(**to_rebind)
+                bind_log_contextvars(**to_rebind)
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -796,7 +797,7 @@ class AgentLoop:
             # ``_process_turn_inline`` would see an empty context and
             # start a fresh root. Rebinding the four keys here is
             # idempotent and leaves other bindings alone.
-            structlog.contextvars.bind_contextvars(
+            bind_log_contextvars(
                 **{
                     "session.key": sid,
                     "channel": channel,
@@ -835,7 +836,7 @@ class AgentLoop:
         # contextvars is what makes subagent trace ancestry survive
         # from ``SubagentManager._run`` into the child's own
         # ``_process_turn_inline``.
-        structlog.contextvars.bind_contextvars(
+        bind_log_contextvars(
             **{
                 "session.key": sid,
                 "channel": msg.channel,

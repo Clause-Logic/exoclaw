@@ -18,8 +18,9 @@ deterministic regression check.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from typing import Awaitable, Callable, TypeVar, cast
+
+from exoclaw._compat import isawaitable
 
 _TTool = TypeVar("_TTool")
 _TVal = TypeVar("_TVal")
@@ -30,7 +31,7 @@ async def _maybe_await(value: Awaitable[_TVal] | _TVal) -> _TVal:
 
     Uses ``inspect.isawaitable`` so Future / Task / custom awaitables
     are handled, not just bare coroutines."""
-    if inspect.isawaitable(value):
+    if isawaitable(value):
         return await cast("Awaitable[_TVal]", value)
     return cast(_TVal, value)
 

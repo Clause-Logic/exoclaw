@@ -193,7 +193,12 @@ class ToolBase:
         schema = self.parameters or {}  # type: ignore[attr-defined]
         if schema.get("type", "object") != "object":
             raise ValueError(f"Schema must be object type, got {schema.get('type')!r}")
-        return self._validate(params, {**schema, "type": "object"}, "")
+        # PEP 448 dict-literal unpacking (``{**schema, ...}``) isn't
+        # supported on MicroPython 1.27 — build via copy + setitem to
+        # work on both runtimes.
+        schema_with_type = dict(schema)
+        schema_with_type["type"] = "object"
+        return self._validate(params, schema_with_type, "")
 
     def _validate(self, val: object, schema: dict[str, object], path: str) -> list[str]:
         t, label = schema.get("type"), path or "parameter"

@@ -189,3 +189,71 @@ def test_make_scratch_path_handles_existing_dir() -> None:
         assert os.path.exists(p)
     finally:
         os.remove(p)
+
+
+def test_open_text_writer_round_trip() -> None:
+    """``open_text_writer`` writes UTF-8 text on both runtimes; the
+    file round-trips through ``open(path).read()``."""
+    p = c.make_scratch_path(prefix="cpy-writer-", suffix=".txt")
+    try:
+        with c.open_text_writer(p) as fh:
+            fh.write("héllo\nwörld\n")
+        with open(p, encoding="utf-8") as fh:
+            assert fh.read() == "héllo\nwörld\n"
+    finally:
+        os.remove(p)
+
+
+def test_log_contextvars_round_trip() -> None:
+    """The structlog-bind helpers survive a bind/get/unbind round-trip
+    on CPython. On MP they're no-ops (covered there); here we exercise
+    the real-structlog branch."""
+    import structlog
+
+    # Start clean so this test doesn't pick up bindings from any
+    # earlier test that forgot to unbind.
+    structlog.contextvars.clear_contextvars()
+
+    assert c.get_log_contextvars() == {}
+    c.bind_log_contextvars(req_id="r-7", trace="t-9")
+    snapshot = c.get_log_contextvars()
+    assert snapshot["req_id"] == "r-7"
+    assert snapshot["trace"] == "t-9"
+    c.unbind_log_contextvars("req_id")
+    assert "req_id" not in c.get_log_contextvars()
+    c.unbind_log_contextvars("trace")
+    assert c.get_log_contextvars() == {}
+
+
+def test_async_queue_round_trip() -> None:
+    """``make_async_queue`` returns a real ``asyncio.Queue`` on
+    CPython. The ``_AsyncQueue`` class is the MicroPython fallback;
+    construct + drive it directly here so the methods are exercised
+    on CPython too — same pattern as ``_NoopLock`` / ``_StubLogger``."""
+    import asyncio
+
+    q = c.make_async_queue()
+
+    async def _round_trip() -> None:
+        await q.put("a")
+        q.put_nowait("b")
+        assert await q.get() == "a"
+        assert await q.get() == "b"
+
+    asyncio.run(_round_trip())
+
+    # ── _AsyncQueue (MP fallback) ───────────────────────────────
+    fallback = c._AsyncQueue()
+    assert fallback.empty() is True
+    assert fallback.qsize() == 0
+
+    async def _fallback_round_trip() -> None:
+        await fallback.put(1)
+        fallback.put_nowait(2)
+        assert fallback.qsize() == 2
+        assert fallback.empty() is False
+        assert await fallback.get() == 1
+        assert await fallback.get() == 2
+        assert fallback.empty() is True
+
+    asyncio.run(_fallback_round_trip())

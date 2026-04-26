@@ -630,26 +630,47 @@ class DirectExecutor:
             inline = await self.execute_tool(registry, name, params, ctx, tool_call_id=tool_call_id)
             return ToolResult(content=inline, content_file=None)
 
+        # ``tool_call_id`` originates outside the executor (LLM /
+        # provider) and may contain path separators or other unusual
+        # bytes. Sanitize aggressively to ASCII alnum + ``-`` / ``_``
+        # and cap at 64 chars before letting it near a filesystem path.
+        suffix = ""
+        if tool_call_id:
+            safe = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in tool_call_id)[:64]
+            if safe:
+                suffix = f"-{safe}"
+
         # Drain the async iterator into a per-turn scratch file.
         # The file persists until ``post_turn`` cleans it up; the
         # provider reads from it during request-body assembly.
-        suffix = f"-{tool_call_id}" if tool_call_id else ""
         fd, path_str = tempfile.mkstemp(prefix="exoclaw-tool-", suffix=f"{suffix}.txt")
         path = Path(path_str)
         bytes_written = 0
-        preview_chunks: list[str] = []
+        # Preview budget is enforced **in bytes**, not characters —
+        # ``bytes_written`` accounts in bytes, so mixing the two would
+        # let non-ASCII output exceed the cap. ``newline=""`` prevents
+        # Windows-style ``\n``→``\r\n`` translation that would also
+        # desync byte counts vs. on-disk size.
+        preview_chunks: list[bytes] = []
         preview_budget = 256
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                async for chunk in streamer(**validated):
-                    if not isinstance(chunk, str):
-                        chunk = str(chunk)
-                    fh.write(chunk)
-                    bytes_written += len(chunk.encode("utf-8"))
-                    if preview_budget > 0:
-                        take = min(preview_budget, len(chunk))
-                        preview_chunks.append(chunk[:take])
-                        preview_budget -= take
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                # Bind ``self`` (the registry) into the dispatch
+                # ContextVar for the duration of the stream — fan-out
+                # tools that call ``ToolRegistry.current()`` from
+                # inside ``execute_streaming`` need this exactly the
+                # same way the inline ``execute`` path provides it.
+                with registry.bind_dispatch():
+                    async for chunk in streamer(**validated):
+                        if not isinstance(chunk, str):
+                            chunk = str(chunk)
+                        chunk_bytes = chunk.encode("utf-8")
+                        fh.write(chunk)
+                        bytes_written += len(chunk_bytes)
+                        if preview_budget > 0:
+                            take = min(preview_budget, len(chunk_bytes))
+                            preview_chunks.append(chunk_bytes[:take])
+                            preview_budget -= take
         except Exception:
             try:
                 path.unlink()
@@ -665,7 +686,11 @@ class DirectExecutor:
             self._scratch_paths_var.set(scratch_paths)
         scratch_paths.append(path)
 
-        preview = "".join(preview_chunks)
+        # Reassemble preview as text. ``errors="ignore"`` covers the
+        # one edge case where the byte budget cut a multi-byte UTF-8
+        # codepoint mid-sequence — the resulting partial bytes are
+        # dropped from the preview rather than crashing the encode.
+        preview = b"".join(preview_chunks).decode("utf-8", errors="ignore")
         if bytes_written > len(preview.encode("utf-8")):
             preview = f"{preview}…\n[streamed {bytes_written} bytes to {path.name}]"
         return ToolResult(content=preview, content_file=path)

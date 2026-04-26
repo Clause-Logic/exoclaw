@@ -622,7 +622,7 @@ class TestDirectExecutorStreamingTool:
                 # Should NOT be called when execute_streaming exists.
                 raise AssertionError("inline execute should be skipped")
 
-            async def execute_streaming(self, **kwargs: object) -> "AsyncIterator[str]":
+            async def execute_streaming(self, **kwargs: object) -> AsyncIterator[str]:
                 # Big enough to overflow the 256-byte preview budget,
                 # so the truncation footer kicks in.
                 yield "x" * 300
@@ -654,7 +654,7 @@ class TestDirectExecutorStreamingTool:
             async def execute(self, **kwargs: object) -> str:
                 return ""
 
-            async def execute_streaming(self, **kwargs: object) -> "AsyncIterator[str]":
+            async def execute_streaming(self, **kwargs: object) -> AsyncIterator[str]:
                 yield "data"
 
         registry.register(_Streaming())
@@ -674,6 +674,70 @@ class TestDirectExecutorStreamingTool:
 
         assert not a.content_file.exists()
         assert not b.content_file.exists()
+
+    async def test_dispatch_registry_bound_during_streaming(self) -> None:
+        """Fan-out tools that call ``ToolRegistry.current()`` from
+        inside ``execute_streaming`` must see the dispatching
+        registry, just like ``execute`` provides during the inline
+        path. Without ``bind_dispatch`` the streaming path would
+        bypass the binding and ``current()`` would return ``None``.
+        """
+        executor = DirectExecutor()
+        registry = ToolRegistry()
+
+        seen: list[ToolRegistry | None] = []
+
+        class _PeekingStream:
+            name = "peeker"
+            description = "checks current registry"
+            parameters: dict[str, object] = {"type": "object", "properties": {}}
+
+            async def execute(self, **kwargs: object) -> str:
+                return ""
+
+            async def execute_streaming(self, **kwargs: object) -> AsyncIterator[str]:
+                seen.append(ToolRegistry.current())
+                yield "ok"
+
+        registry.register(_PeekingStream())
+
+        await executor.execute_tool_with_handle(registry, "peeker", {})
+
+        assert seen == [registry]
+
+    async def test_unsafe_tool_call_id_does_not_break_filename(self) -> None:
+        """LLM-supplied ``tool_call_id`` may contain path separators or
+        other unusual characters. The executor sanitizes to alnum +
+        ``-`` / ``_`` and caps at 64 chars before letting it near
+        ``mkstemp``."""
+        executor = DirectExecutor()
+        registry = ToolRegistry()
+
+        class _Stream:
+            name = "s"
+            description = ""
+            parameters: dict[str, object] = {"type": "object", "properties": {}}
+
+            async def execute(self, **kwargs: object) -> str:
+                return ""
+
+            async def execute_streaming(self, **kwargs: object) -> AsyncIterator[str]:
+                yield "x"
+
+        registry.register(_Stream())
+
+        outcome = await executor.execute_tool_with_handle(
+            registry,
+            "s",
+            {},
+            tool_call_id="../../../etc/passwd\x00\n",
+        )
+
+        assert outcome.content_file is not None
+        # No path separator / null / newline in the resolved scratch path.
+        assert "/etc/passwd" not in str(outcome.content_file)
+        assert "\x00" not in str(outcome.content_file)
+        assert "\n" not in str(outcome.content_file)
 
     async def test_protocol_default_returns_inline_toolresult(self) -> None:
         """Executors that don't override ``execute_tool_with_handle``

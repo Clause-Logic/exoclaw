@@ -465,11 +465,22 @@ class AgentLoop:
                         # Provider reads from disk during request-body
                         # assembly. The leading underscore signals
                         # "transport metadata, not part of the LLM
-                        # message" — providers and persistence layers
-                        # strip it before serialising / writing JSONL.
+                        # message".
                         tool_msg["_content_file"] = str(content_file)
                     self._executor.append_messages([tool_msg])
-                    await _flush(tool_msg)
+                    # Persistence path strips ``_``-prefixed transport
+                    # metadata. Otherwise ``_content_file`` would land
+                    # in the session JSONL pointing at a temp path
+                    # that ``post_turn`` will unlink at end-of-turn —
+                    # later reloads would see the key but the file
+                    # would already be gone. The in-memory executor
+                    # buffer (``append_messages`` above) keeps the
+                    # full dict so the provider still has the path
+                    # for this turn's outgoing requests.
+                    persisted_tool_msg = {
+                        k: v for k, v in tool_msg.items() if not k.startswith("_")
+                    }
+                    await _flush(persisted_tool_msg)
             else:
                 clean = self._strip_think(response.content)
                 if response.finish_reason == "error":

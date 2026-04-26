@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
+from collections.abc import Iterator
 
 from exoclaw.agent.tools.protocol import Tool, ToolContext
 
@@ -136,16 +138,19 @@ class ToolRegistry:
     def stream_dispatch(
         self, name: str, params: dict[str, object]
     ) -> tuple[Tool, dict[str, object]] | str:
-        """Resolve a streaming tool call without invoking it yet.
+        """Resolve a tool call for a potential streaming path without
+        invoking it.
 
-        Returns ``(tool, validated_params)`` when the tool exists and
-        implements ``execute_streaming``; returns an error string for
-        unknown tools / invalid params; returns ``None``-equivalent
-        (sentinel via the union: caller checks ``hasattr(tool,
-        'execute_streaming')``) when the tool exists but doesn't opt
-        into streaming. The caller is responsible for binding the
-        dispatch ContextVar around the iteration and for awaiting the
-        async iterator.
+        Returns the same shape as :meth:`_resolve`:
+        ``(tool, validated_params)`` when the tool exists and the
+        parameters are valid, or an error string for unknown tools /
+        invalid params. This helper does **not** check whether the
+        resolved tool implements ``execute_streaming`` — callers
+        (typically ``DirectExecutor.execute_tool_with_handle``)
+        inspect the returned tool themselves before starting any
+        async iteration, and use :meth:`bind_dispatch` to mirror the
+        ``_dispatch_registry`` ContextVar binding that
+        :meth:`execute` would have provided.
 
         Kept separate from :meth:`execute` because the streaming path
         is invoked from the executor, not the registry — the executor
@@ -154,8 +159,28 @@ class ToolRegistry:
         inside the registry would force the registry to know about
         scratch files, which is the executor's concern.
         """
-        resolved = self._resolve(name, params)
-        return resolved
+        return self._resolve(name, params)
+
+    @contextlib.contextmanager
+    def bind_dispatch(self) -> Iterator[None]:
+        """Bind ``self`` into ``_dispatch_registry`` for the body of
+        the context.
+
+        The streaming executor path bypasses :meth:`execute`, which
+        normally sets ``_dispatch_registry`` for the duration of the
+        tool body. Without this binding, fan-out tools that call
+        :meth:`ToolRegistry.current` from inside their
+        ``execute_streaming`` body would see ``None`` and break
+        (``BatchTool``, ``ReduceTool``, anything that looks up
+        sibling tools by name). The token is restored on exit so
+        nested dispatches compose correctly — same semantics as
+        :meth:`execute`'s set/reset pair.
+        """
+        token = _dispatch_registry.set(self)
+        try:
+            yield
+        finally:
+            _dispatch_registry.reset(token)
 
     def _resolve(
         self, name: str, params: dict[str, object]

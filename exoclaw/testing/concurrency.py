@@ -23,15 +23,15 @@ state). Plugin authors run their test suites on CPython, where
 there. Marked as a whole because partial line-level pragmas would
 just clutter the file."""
 
-from __future__ import annotations
+from __future__ import annotations  # pragma: no cover (micropython)
 
-import asyncio
-from typing import Awaitable, Callable, TypeVar, cast
+import asyncio  # pragma: no cover (micropython)
+from typing import Awaitable, Callable, TypeVar, cast  # pragma: no cover (micropython)
 
-from exoclaw._compat import isawaitable
+from exoclaw._compat import isawaitable  # pragma: no cover (micropython)
 
-_TTool = TypeVar("_TTool")
-_TVal = TypeVar("_TVal")
+_TTool = TypeVar("_TTool")  # pragma: no cover (micropython)
+_TVal = TypeVar("_TVal")  # pragma: no cover (micropython)
 
 
 async def _maybe_await(value: Awaitable[_TVal] | _TVal) -> _TVal:  # pragma: no cover (micropython)
@@ -109,4 +109,4 @@ async def assert_set_context_isolates_per_task(  # pragma: no cover (micropython
     )
 
 
-__all__ = ["assert_set_context_isolates_per_task"]
+__all__ = ["assert_set_context_isolates_per_task"]  # pragma: no cover (micropython)

@@ -201,6 +201,76 @@ def test_validate_params_string_length():
     assert any("at most" in e for e in t.validate_params({"s": "abcdef"}))
 
 
+def test_cast_params_invalid_int_string_passes_through():
+    """``int(value)`` raising ValueError → return original value
+    unchanged. Validation will reject it later as ``should be integer``."""
+    cast_result = _IntTool().cast_params({"n": "not-a-number"})
+    assert cast_result == {"n": "not-a-number"}
+
+
+def test_cast_params_invalid_number_string_passes_through():
+    """``float(value)`` raising ValueError → return original value."""
+
+    class _NumTool(ToolBase):
+        name = "ntool"
+        description = "x"
+        parameters = {"type": "object", "properties": {"x": {"type": "number"}}}
+
+    cast_result = _NumTool().cast_params({"x": "abc"})
+    assert cast_result == {"x": "abc"}
+
+
+def test_cast_params_nested_object_recursion():
+    """Nested object schemas recurse through ``_cast_object`` so
+    inner casts (e.g. string → int) apply on inner fields."""
+
+    class _NestedTool(ToolBase):
+        name = "ntool"
+        description = "x"
+        parameters = {
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {"id": {"type": "integer"}},
+                }
+            },
+        }
+
+    cast_result = _NestedTool().cast_params({"user": {"id": "42"}})
+    assert cast_result == {"user": {"id": 42}}
+
+
+def test_validate_params_array_items():
+    """Array items with a per-item schema → each item validated
+    against that schema. Wrong-type items show up as errors."""
+
+    class _ArrTool(ToolBase):
+        name = "atool"
+        description = "x"
+        parameters = {
+            "type": "object",
+            "properties": {"ids": {"type": "array", "items": {"type": "integer"}}},
+        }
+
+    t = _ArrTool()
+    assert t.validate_params({"ids": [1, 2, 3]}) == []
+    errors = t.validate_params({"ids": [1, "bad"]})
+    assert any("integer" in e.lower() for e in errors)
+
+
+def test_validate_params_number_wrong_type():
+    """Number field given a non-numeric value → ``should be number``."""
+
+    class _NumTool(ToolBase):
+        name = "ntool"
+        description = "x"
+        parameters = {"type": "object", "properties": {"x": {"type": "number"}}}
+
+    errors = _NumTool().validate_params({"x": "abc"})
+    assert any("number" in e.lower() for e in errors)
+
+
 def test_validate_params_nested_object():
     """Nested ``object`` schemas recurse — required fields inside the
     nested object are checked too."""

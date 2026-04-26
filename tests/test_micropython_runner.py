@@ -125,7 +125,30 @@ def _executable_lines_for(runtime: str, source_path: Path) -> set[int]:
     # ``pyproject.toml`` — bare ellipsis on its own line is the
     # standard idiom for unreachable abstract method bodies.
     ellipsis = r"^\s*\.\.\.\s*$"
-    exclude = f"({bare}|{tagged}|{ellipsis})"
+    parts = [bare, tagged, ellipsis]
+    # ``if TYPE_CHECKING:`` blocks never execute at runtime on either
+    # runtime — ``TYPE_CHECKING`` is a hard ``False`` constant. Block
+    # expansion below cascades the exclusion to the body.
+    parts.append(r"^\s*if TYPE_CHECKING:\s*$")
+    if runtime == "micropython":
+        # MicroPython's ``sys.settrace`` doesn't fire ``line`` events
+        # on def / class headers whose body is a same-line ``...``
+        # (the inline-stub idiom for Protocol methods, abstract
+        # methods, etc.). coverage.py counts them as statements on
+        # CPython where the tracer DOES fire on them, but on MP
+        # they're permanently uncovered through no fault of any
+        # test. Exclude them from the MP-reachable set.
+        inline_stub = r":\s*\.\.\.\s*(#.*)?$"
+        parts.append(inline_stub)
+        # NOTE: an earlier version of this code excluded ``name: Type``
+        # annotation-only lines via regex. coverage.py treats matched
+        # lines as part of the surrounding logical statement, so a
+        # match on a function-parameter continuation line ended up
+        # excluding the entire ``def`` and its body — drastic over-
+        # exclusion. Whole-class-body annotations (e.g. TypedDict
+        # fields, Protocol attrs) are now handled with explicit
+        # ``# pragma: no cover (micropython)`` comments at the source.
+    exclude = "(" + "|".join(parts) + ")"
 
     parser = PythonParser(filename=str(source_path), exclude=exclude)
     parser.parse_source()

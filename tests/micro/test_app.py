@@ -9,7 +9,6 @@ contract that doesn't fit a unit test.
 Pure-Python — runs under ``tests/_micropython_runner/run.py``.
 """
 
-
 from exoclaw.agent.loop import AgentLoop
 from exoclaw.app import Exoclaw
 from exoclaw.bus.queue import MessageBus
@@ -114,6 +113,29 @@ def test_build_threads_explicit_model():
     )
     _bus, agent, _mgr = app._build()
     assert agent.model == "explicit-model"
+
+
+def test_app_run_handles_immediate_stop():
+    """``app.run()`` starts everything and stops cleanly when
+    ``loop.stop()`` is called externally. Covers the ``run`` method
+    body — gather → cleanup."""
+    import asyncio
+
+    app = Exoclaw(provider=_StubProvider(), conversation=_StubConversation())
+
+    async def _go():
+        run_task = asyncio.create_task(app.run())
+        # Yield long enough for the loop to enter its consume loop.
+        await asyncio.sleep(0.05)
+        # Cancel the run task to exit cleanly. ``app.run`` catches
+        # CancelledError as a graceful-stop signal.
+        run_task.cancel()
+        try:
+            await run_task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_go())
 
 
 def test_build_passes_tools_through():

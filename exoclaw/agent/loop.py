@@ -688,15 +688,36 @@ class AgentLoop:
                 if msg.content.strip().lower() == "/stop":
                     await self._handle_stop(msg)
                 else:
-                    task = create_isolated_task(self._dispatch(msg))
-                    self._active_tasks.setdefault(msg.session_key, []).append(task)
+                    # ``_remove_task`` runs after dispatch finishes —
+                    # uses CPython's ``add_done_callback`` when
+                    # available (real asyncio.Task) and a finally
+                    # wrapper otherwise (uasyncio Task on
+                    # MicroPython, which doesn't ship the callback
+                    # API). Both paths drain the per-session list
+                    # so it doesn't grow unboundedly.
+                    session_key = msg.session_key
 
-                    def _remove_task(t: asyncio.Task[None], k: str = msg.session_key) -> None:
+                    def _remove_task(t: asyncio.Task[None], k: str = session_key) -> None:
                         tasks = self._active_tasks.get(k, [])
                         if t in tasks:
                             tasks.remove(t)
 
-                    task.add_done_callback(_remove_task)
+                    add_cb = getattr(asyncio.Task, "add_done_callback", None)
+                    if add_cb is not None:
+                        task = create_isolated_task(self._dispatch(msg))
+                        task.add_done_callback(_remove_task)
+                    else:
+
+                        async def _wrapped(_msg: InboundMessage = msg) -> None:
+                            try:
+                                await self._dispatch(_msg)
+                            finally:
+                                cur = asyncio.current_task()
+                                if cur is not None:
+                                    _remove_task(cast("asyncio.Task[None]", cur))
+
+                        task = create_isolated_task(_wrapped())
+                    self._active_tasks.setdefault(session_key, []).append(task)
         finally:
             all_tasks = [t for ts in self._active_tasks.values() for t in ts if not t.done()]
             for t in all_tasks:

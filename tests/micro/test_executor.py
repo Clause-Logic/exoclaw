@@ -138,6 +138,47 @@ def test_post_turn_runs_without_appendable_conversation():
     asyncio.run(_go())
 
 
+def test_load_messages_before_set_messages_returns_empty():
+    """First call to ``load_messages`` on a fresh executor (before
+    ``set_messages``) hits the ``LookupError`` fallback inside
+    ``_get_prior_source``: it installs ``_empty_prior_source`` and
+    returns ``[]``. Same path the agent loop uses on a brand-new
+    ``DirectExecutor`` instance."""
+    ex = DirectExecutor()
+    msgs = ex.load_messages()
+    assert msgs == []
+
+
+def test_append_messages_before_set_messages_initialises_delta():
+    """``append_messages`` triggers the ``LookupError`` path inside
+    ``_get_delta`` when called before any explicit set — the empty
+    delta gets installed lazily."""
+    ex = DirectExecutor()
+    ex.append_messages([{"role": "user", "content": "hi"}])
+    msgs = ex.load_messages()
+    assert msgs == [{"role": "user", "content": "hi"}]
+
+
+def test_set_prior_source_with_callable_replaces_prior():
+    """``set_prior_source`` installs a custom callable that
+    ``load_messages`` invokes on each call — the disk-backed-prior
+    pattern (memory-model.md phase 2b)."""
+    ex = DirectExecutor()
+    call_count = [0]
+
+    def _source():
+        call_count[0] += 1
+        return [{"role": "system", "content": "from-source"}]
+
+    ex.set_prior_source(_source)
+    ex.append_messages([{"role": "user", "content": "u"}])
+    msgs = ex.load_messages()
+    assert msgs[0]["content"] == "from-source"
+    assert msgs[1]["content"] == "u"
+    # Source was invoked once for this load_messages call.
+    assert call_count[0] >= 1
+
+
 def test_empty_prior_source():
     """``_empty_prior_source`` is the seed used before any
     ``set_messages`` call — returns ``[]`` so a premature

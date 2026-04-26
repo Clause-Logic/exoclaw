@@ -191,6 +191,62 @@ def test_make_scratch_path_handles_existing_dir() -> None:
         os.remove(p)
 
 
+def test_path_helpers() -> None:
+    """``path_basename`` returns the trailing component;
+    ``path_exists`` mirrors ``os.path.exists`` via ``os.stat`` +
+    ``OSError`` catch."""
+    assert c.path_basename("/tmp/foo.txt") == "foo.txt"
+    assert c.path_basename("foo.txt") == "foo.txt"  # no separator
+    assert c.path_basename("/") == ""
+
+    p = c.make_scratch_path(prefix="cpy-exists-")
+    try:
+        assert c.path_exists(p) is True
+        os.remove(p)
+        assert c.path_exists(p) is False
+    finally:
+        # Already removed inside the test body, but defensive — the
+        # cleanup path can re-fail silently.
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def test_monotonic_helpers() -> None:
+    """``monotonic_ms`` returns int milliseconds; ``monotonic_diff_ms``
+    is just subtraction on CPython (the wrap-safe path is MP-only)."""
+    a = c.monotonic_ms()
+    b = c.monotonic_ms()
+    assert isinstance(a, int)
+    assert isinstance(b, int)
+    assert b >= a
+    assert c.monotonic_diff_ms(b, a) == b - a
+
+
+def test_async_queue_blocks_on_empty_get() -> None:
+    """The ``_AsyncQueue.get`` loop awaits ``_event.wait`` when the
+    list is empty. Verify the wait/clear cycle works by putting
+    after a short delay and checking get unblocks."""
+    import asyncio
+
+    q = c._AsyncQueue()
+
+    async def _go() -> None:
+        async def _put_later() -> None:
+            await asyncio.sleep(0.01)
+            await q.put("hello")
+
+        producer = asyncio.create_task(_put_later())
+        # ``get`` will await the event since the queue is empty;
+        # the producer task fills it after 10ms.
+        item = await q.get()
+        assert item == "hello"
+        await producer
+
+    asyncio.run(_go())
+
+
 def test_open_text_writer_round_trip() -> None:
     """``open_text_writer`` writes UTF-8 text on both runtimes; the
     file round-trips through ``open(path).read()``."""

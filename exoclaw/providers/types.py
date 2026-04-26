@@ -52,43 +52,51 @@ class LLMResponse:
 # ---------------------------------------------------------------------------
 # Response format types (compatible with OpenAI SDK types)
 # ---------------------------------------------------------------------------
+#
+# The TypedDict subclasses below carry only field annotations.
+# CPython evaluates annotations at class-creation time and counts
+# them as covered; MicroPython compiles annotations away entirely,
+# so coverage.py's executable line set includes lines that the MP
+# bytecode never actually executes. Mark each ``name: Type``
+# annotation as MP-excluded so the matrix entry isn't penalised
+# for the asymmetry — the runtime impact is zero either way.
 
 
 class ResponseFormatText(TypedDict):
     """Default response format. Used to generate text responses."""
 
-    type: Required[str]  # Literal["text"]
+    type: Required[str]  # Literal["text"] # pragma: no cover (micropython)
 
 
 class JSONSchema(TypedDict):
     """Structured Outputs configuration options, including a JSON Schema."""
 
-    name: Required[str]
+    name: Required[str]  # pragma: no cover (micropython)
     """Must be a-z, A-Z, 0-9, underscores and dashes, max 64 chars."""
 
-    description: str
+    description: str  # pragma: no cover (micropython)
     """Description of what the response format is for."""
 
-    schema: dict[str, object]
+    schema: dict[str, object]  # pragma: no cover (micropython)
     """The schema for the response format, as a JSON Schema object."""
 
-    strict: Optional[bool]
+    strict: Optional[bool]  # pragma: no cover (micropython)
     """Whether to enable strict schema adherence."""
 
 
 class ResponseFormatJSONSchema(TypedDict):
     """JSON Schema response format for structured outputs."""
 
-    json_schema: Required[JSONSchema]
+    json_schema: Required[JSONSchema]  # pragma: no cover (micropython)
     """Structured Outputs configuration options, including a JSON Schema."""
 
-    type: Required[str]  # Literal["json_schema"]
+    type: Required[str]  # Literal["json_schema"] # pragma: no cover (micropython)
 
 
 class ResponseFormatJSONObject(TypedDict):
     """JSON object response format. Prefer json_schema for models that support it."""
 
-    type: Required[str]  # Literal["json_object"]
+    type: Required[str]  # Literal["json_object"] # pragma: no cover (micropython)
 
 
 # ``Union[A, B, C]`` is a runtime subscription — MicroPython 1.27's

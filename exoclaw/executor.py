@@ -169,18 +169,37 @@ def _supports_append(conversation: Conversation) -> TypeGuard[AppendableConversa
     coroutine. Narrows the static type to ``AppendableConversation`` so
     callers can reach the opt-in methods without a cast.
 
-    ``asyncio.iscoroutinefunction`` rather than ``hasattr`` — a
-    ``MagicMock`` stand-in has every attribute, and we don't want the
-    many tests that patch Conversation with a plain Mock to
-    accidentally activate the per-message path and then crash on an
-    ``await`` of a non-coroutine.
+    ``iscoroutinefunction`` rather than ``hasattr`` — a ``MagicMock``
+    stand-in has every attribute, and we don't want the many tests
+    that patch Conversation with a plain Mock to accidentally
+    activate the per-message path and then crash on an ``await`` of
+    a non-coroutine.
+
+    Tries the **class** attribute first, then falls back to the
+    instance attribute. The two-step lookup handles both runtimes:
+
+    - MicroPython: bound methods have ``__class__.__name__ ==
+      "bound_method"`` and don't expose ``__func__`` / ``__self__``,
+      so introspecting the bound method returns False even when the
+      underlying ``async def`` is what we want. ``type(conv).append``
+      returns the unbound function whose class IS ``generator`` for
+      ``async def`` — caught by the class-attribute path.
+    - CPython with ``MagicMock(spec=...)``: ``type(mock).append`` is
+      None (MagicMock doesn't put spec attrs on the type, only the
+      instance), and the test sets ``mock.append = AsyncMock(...)``
+      on the instance. Falls through to the instance attribute, which
+      ``inspect.iscoroutinefunction`` correctly recognises as async.
     """
-    fn = getattr(conversation, "append", None)
+    fn = getattr(type(conversation), "append", None)
+    if fn is None:
+        fn = getattr(conversation, "append", None)
     return iscoroutinefunction(fn)
 
 
 def _supports_post_turn(conversation: Conversation) -> TypeGuard[AppendableConversation]:
-    fn = getattr(conversation, "post_turn", None)
+    fn = getattr(type(conversation), "post_turn", None)
+    if fn is None:
+        fn = getattr(conversation, "post_turn", None)
     return iscoroutinefunction(fn)
 
 
@@ -652,14 +671,19 @@ class DirectExecutor:
         # Past this guard ``streamer`` is the async-generator
         # function — narrow for the type checker (the shim
         # ``isasyncgenfunction`` doesn't return a ``TypeGuard``).
-        assert streamer is not None
+        # Every line below is unreachable on MicroPython —
+        # ``_compat.isasyncgenfunction`` returns False there
+        # (``inspect.co_flags`` introspection isn't reliable across
+        # MP builds), so the guard above always returns. Mark
+        # MP-excluded; CPython tests still cover this path.
+        assert streamer is not None  # pragma: no cover (micropython)
 
         # ``tool_call_id`` originates outside the executor (LLM /
         # provider) and may contain path separators or other unusual
         # bytes. Sanitize aggressively to ASCII alnum + ``-`` / ``_``
         # and cap at 64 chars before letting it near a filesystem path.
-        suffix = ""
-        if tool_call_id:
+        suffix = ""  # pragma: no cover (micropython)
+        if tool_call_id:  # pragma: no cover (micropython)
             safe = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in tool_call_id)[:64]
             if safe:
                 suffix = f"-{safe}"
@@ -667,16 +691,18 @@ class DirectExecutor:
         # Drain the async iterator into a per-turn scratch file.
         # The file persists until ``post_turn`` cleans it up; the
         # provider reads from it during request-body assembly.
-        path = make_scratch_path(prefix="exoclaw-tool-", suffix=f"{suffix}.txt")
-        bytes_written = 0
+        path = make_scratch_path(  # pragma: no cover (micropython)
+            prefix="exoclaw-tool-", suffix=f"{suffix}.txt"
+        )
+        bytes_written = 0  # pragma: no cover (micropython)
         # Preview budget is enforced **in bytes**, not characters —
         # ``bytes_written`` accounts in bytes, so mixing the two would
         # let non-ASCII output exceed the cap. ``newline=""`` prevents
         # Windows-style ``\n``→``\r\n`` translation that would also
         # desync byte counts vs. on-disk size.
-        preview_chunks: list[bytes] = []
-        preview_budget = 256
-        try:
+        preview_chunks: list[bytes] = []  # pragma: no cover (micropython)
+        preview_budget = 256  # pragma: no cover (micropython)
+        try:  # pragma: no cover (micropython)
             with open_text_writer(path) as fh:
                 # Bind ``self`` (the registry) into the dispatch
                 # ContextVar for the duration of the stream — fan-out
@@ -694,7 +720,7 @@ class DirectExecutor:
                             take = min(preview_budget, len(chunk_bytes))
                             preview_chunks.append(chunk_bytes[:take])
                             preview_budget -= take
-        except Exception:
+        except Exception:  # pragma: no cover (micropython)
             try:
                 os.remove(path)
             except OSError:
@@ -702,21 +728,23 @@ class DirectExecutor:
             raise
 
         # Track for cleanup at ``post_turn``.
-        try:
+        try:  # pragma: no cover (micropython)
             scratch_paths = self._scratch_paths_var.get()
-        except LookupError:
+        except LookupError:  # pragma: no cover (micropython)
             scratch_paths = []
             self._scratch_paths_var.set(scratch_paths)
-        scratch_paths.append(path)
+        scratch_paths.append(path)  # pragma: no cover (micropython)
 
         # Reassemble preview as text. ``errors="ignore"`` covers the
         # one edge case where the byte budget cut a multi-byte UTF-8
         # codepoint mid-sequence — the resulting partial bytes are
         # dropped from the preview rather than crashing the encode.
-        preview = b"".join(preview_chunks).decode("utf-8", errors="ignore")
-        if bytes_written > len(preview.encode("utf-8")):
+        preview = b"".join(preview_chunks).decode(  # pragma: no cover (micropython)
+            "utf-8", errors="ignore"
+        )
+        if bytes_written > len(preview.encode("utf-8")):  # pragma: no cover (micropython)
             preview = f"{preview}…\n[streamed {bytes_written} bytes to {path_basename(path)}]"
-        return ToolResult(content=preview, content_file=path)
+        return ToolResult(content=preview, content_file=path)  # pragma: no cover (micropython)
 
     async def build_prompt(
         self,
@@ -755,7 +783,14 @@ class DirectExecutor:
         #     isolated mode dropped it, etc.).
         # See ``docs/memory-model.md`` phase 2b / Step C.
         loader = getattr(conversation, "load_persisted_history", None)
-        if callable(loader) and not iscoroutinefunction(loader):
+        # Two-step lookup so MP's class-attribute path catches async
+        # methods (bound methods on MP aren't introspectable) and
+        # CPython's instance-attribute path catches mocks. See
+        # ``_supports_append`` above for the full rationale.
+        loader_fn = getattr(type(conversation), "load_persisted_history", None)
+        if loader_fn is None:
+            loader_fn = loader
+        if callable(loader) and not iscoroutinefunction(loader_fn):
             history_snapshot = loader(session_id)
             source = _build_lazy_prior_source(
                 full=messages,

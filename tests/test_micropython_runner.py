@@ -317,9 +317,7 @@ def test_micropython_suite_passes_with_coverage(tmp_path: Path) -> None:
     if total_executable == 0:
         pytest.fail(
             "MicroPython coverage report had zero traceable lines. "
-            "Stage root={!r}; covered keys={!r}".format(
-                str(stage_root), list(covered_by_file)[:5]
-            )
+            "Stage root={!r}; covered keys={!r}".format(str(stage_root), list(covered_by_file)[:5])
         )
 
     coverage = total_hit / total_executable

@@ -12,7 +12,6 @@ Pure-Python — runs under ``tests/_micropython_runner/run.py``.
 import asyncio
 
 from exoclaw.agent.loop import AgentLoop
-from exoclaw.bus.events import InboundMessage
 from exoclaw.bus.queue import MessageBus
 from exoclaw.providers.types import LLMResponse, ToolCallRequest
 
@@ -51,9 +50,7 @@ class _ToolThenAnswerProvider:
             return LLMResponse(
                 content=None,
                 tool_calls=[
-                    ToolCallRequest(
-                        id="call-1", name=self._tool_name, arguments=self._args
-                    )
+                    ToolCallRequest(id="call-1", name=self._tool_name, arguments=self._args)
                 ],
                 finish_reason="tool_calls",
             )
@@ -141,9 +138,7 @@ def test_agent_loop_executes_tool_then_answers():
     bus = MessageBus()
     provider = _ToolThenAnswerProvider("add", {"a": 2, "b": 3})
     conv = _MemoryConversation()
-    loop = AgentLoop(
-        bus=bus, provider=provider, conversation=conv, tools=[_AddTool()]
-    )
+    loop = AgentLoop(bus=bus, provider=provider, conversation=conv, tools=[_AddTool()])
 
     async def _go():
         content, new_msgs = await loop.process_turn("session:y", "add 2 + 3")

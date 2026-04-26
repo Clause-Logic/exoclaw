@@ -13,7 +13,15 @@ so each task sees its own binding. Hand-checking each new tool is
 unreliable; this helper exists so any tool's test suite can call
 ``assert_set_context_isolates_per_task(...)`` and get a
 deterministic regression check.
-"""
+
+**MicroPython note:** every line below is excluded from the
+MicroPython coverage scope. The helper's premise — per-task
+ContextVar isolation — doesn't hold under uasyncio's cooperative
+single-task model (``_compat.TaskLocal`` on MP is module-level
+state). Plugin authors run their test suites on CPython, where
+``ContextVar`` actually scopes per task, so the helper does its job
+there. Marked as a whole because partial line-level pragmas would
+just clutter the file."""
 
 from __future__ import annotations
 
@@ -26,7 +34,7 @@ _TTool = TypeVar("_TTool")
 _TVal = TypeVar("_TVal")
 
 
-async def _maybe_await(value: Awaitable[_TVal] | _TVal) -> _TVal:
+async def _maybe_await(value: Awaitable[_TVal] | _TVal) -> _TVal:  # pragma: no cover (micropython)
     """Await value if it's awaitable, otherwise return as-is.
 
     Uses ``inspect.isawaitable`` so Future / Task / custom awaitables
@@ -36,7 +44,7 @@ async def _maybe_await(value: Awaitable[_TVal] | _TVal) -> _TVal:
     return cast(_TVal, value)
 
 
-async def assert_set_context_isolates_per_task(
+async def assert_set_context_isolates_per_task(  # pragma: no cover (micropython)
     *,
     make_tool: Callable[[], _TTool],
     set_context: Callable[[_TTool, str], Awaitable[None] | None],

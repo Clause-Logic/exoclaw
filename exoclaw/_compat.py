@@ -364,7 +364,8 @@ def monotonic_ms() -> int:
     if IS_MICROPYTHON:  # pragma: no cover (cpython)
         import time as _time
 
-        return _time.ticks_ms()
+        # ``ticks_ms`` is MP-only — opaque to ty, hence the getattr.
+        return getattr(_time, "ticks_ms")()
     import time as _time  # pragma: no cover (micropython)
 
     return int(_time.monotonic() * 1000)  # pragma: no cover (micropython)
@@ -379,7 +380,8 @@ def monotonic_diff_ms(later: int, earlier: int) -> int:
     if IS_MICROPYTHON:  # pragma: no cover (cpython)
         import time as _time
 
-        return _time.ticks_diff(later, earlier)
+        # ``ticks_diff`` is MP-only — opaque to ty, hence the getattr.
+        return getattr(_time, "ticks_diff")(later, earlier)
     return later - earlier  # pragma: no cover (micropython)
 
 

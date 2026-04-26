@@ -26,9 +26,7 @@ def test_inbound_round_trip():
     bus = MessageBus()
 
     async def _go():
-        msg = InboundMessage(
-            channel="telegram", sender_id="u1", chat_id="c1", content="hello"
-        )
+        msg = InboundMessage(channel="telegram", sender_id="u1", chat_id="c1", content="hello")
         await bus.publish_inbound(msg)
         got = await bus.consume_inbound()
         assert got is msg, "inbound round-trip lost identity"

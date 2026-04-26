@@ -11,7 +11,15 @@ import asyncio
 
 from exoclaw._compat import path_exists
 from exoclaw.agent.tools.registry import ToolRegistry
-from exoclaw.executor import DirectExecutor, ToolResult, _uuid7
+from exoclaw.executor import (
+    DirectExecutor,
+    ToolResult,
+    _build_lazy_prior_source,
+    _empty_prior_source,
+    _supports_append,
+    _supports_post_turn,
+    _uuid7,
+)
 
 
 class _StaticTool:
@@ -128,6 +136,115 @@ def test_post_turn_runs_without_appendable_conversation():
         await ex.post_turn(_ConvWithoutPostTurn(), "session:x")
 
     asyncio.run(_go())
+
+
+def test_empty_prior_source():
+    """``_empty_prior_source`` is the seed used before any
+    ``set_messages`` call — returns ``[]`` so a premature
+    ``load_messages`` doesn't raise."""
+    assert _empty_prior_source() == []
+
+
+def test_build_lazy_prior_source_non_list_history():
+    """A non-list ``history_snapshot`` (e.g. a Mock returning a
+    truthy stand-in) → returns None so the executor falls back to
+    the closure-over-list path."""
+    out = _build_lazy_prior_source(
+        full=[{"role": "user", "content": "hi"}],
+        history_snapshot="not-a-list",  # Defensive type guard.
+        reload_history=lambda: [],
+    )
+    assert out is None
+
+
+def test_build_lazy_prior_source_empty_history():
+    """Empty history snapshot → no lazy source needed."""
+    out = _build_lazy_prior_source(
+        full=[{"role": "user", "content": "hi"}],
+        history_snapshot=[],
+        reload_history=lambda: [],
+    )
+    assert out is None
+
+
+def test_build_lazy_prior_source_history_too_large():
+    """Snapshot longer than ``full`` can't fit anywhere in ``full``
+    → returns None."""
+    out = _build_lazy_prior_source(
+        full=[{"role": "user", "content": "hi"}],
+        history_snapshot=[{"a": 1}, {"b": 2}],
+        reload_history=lambda: [],
+    )
+    assert out is None
+
+
+def test_build_lazy_prior_source_finds_match_and_reloads():
+    """Snapshot found inside ``full`` as a contiguous sublist →
+    returns a callable that re-reads via ``reload_history`` on each
+    invocation. Prefix and suffix close over the surrounding
+    messages."""
+    history = [{"role": "user", "content": "msg1"}, {"role": "assistant", "content": "r1"}]
+    full = (
+        [{"role": "system", "content": "sys"}] + history + [{"role": "user", "content": "current"}]
+    )
+
+    reload_count = [0]
+
+    def _reload():
+        reload_count[0] += 1
+        return history
+
+    src = _build_lazy_prior_source(full=full, history_snapshot=history, reload_history=_reload)
+    assert src is not None
+    out = src()
+    # Reconstruct: prefix + reloaded + suffix.
+    assert out == full
+    assert reload_count[0] == 1
+    # Second call re-reads — that's the point of the laziness.
+    src()
+    assert reload_count[0] == 2
+
+
+def test_build_lazy_prior_source_no_match():
+    """Snapshot doesn't appear as a contiguous sublist of full →
+    None (caller falls back to closure-over-list)."""
+    out = _build_lazy_prior_source(
+        full=[{"role": "user", "content": "different"}],
+        history_snapshot=[{"role": "user", "content": "missing"}],
+        reload_history=lambda: [],
+    )
+    assert out is None
+
+
+def test_supports_append_returns_false_for_non_async_method():
+    """``_supports_append`` requires ``append`` to be a coroutine.
+    Non-coroutine attribute (sync function) → False. Mirrors the
+    defence against ``MagicMock`` auto-attrs in tests."""
+
+    class _SyncAppend:
+        def append(self, session_id, message):
+            return None
+
+    assert _supports_append(_SyncAppend()) is False
+
+
+def test_supports_append_returns_true_for_async_method():
+    """Coroutine ``append`` → True."""
+
+    class _AsyncAppend:
+        async def append(self, session_id, message):
+            return None
+
+    assert _supports_append(_AsyncAppend()) is True
+
+
+def test_supports_post_turn_returns_false_for_missing_method():
+    """No ``post_turn`` attr at all → False, no raise."""
+
+    class _Empty:
+        pass
+
+    assert _supports_post_turn(_Empty()) is False
 
 
 def test_post_turn_cleans_up_scratch_files():

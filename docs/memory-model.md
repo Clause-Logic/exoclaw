@@ -241,64 +241,103 @@ The `set_messages(initial_messages)` overwrite at the top of
 survives through the loop, and the between-iteration RAM floor
 drops by ≈ prior history size per active subagent.
 
-### Step B — streaming LLM request body (phase 3)
+### ~~Step B — streaming LLM request body~~ [SHIPPED]
 
-Replace `json.dumps(messages)` inside the provider adapter with a
-generator that yields JSON chunks: `b'{"messages":['` → one
-`json.dumps(msg)` per yielded piece → `b']}'`. Pipe into httpx's
-streaming-body support. Kills the "third copy" — the JSON string
-that coexists with the Python list at the moment of send.
+*exoclaw-provider-openai 0.1.0 (PR exoclaw-plugins#60)*
 
-Touches the provider protocol (currently takes `messages: list`,
-needs to accept `messages: AsyncIterable | list`). Every provider
-impl (LiteLLM, direct, any future) needs updating. Response path
-already supports streaming (SSE) on all major providers — just need
-to use it.
+`exoclaw-provider-openai._stream_body` emits the request body as
+`AsyncIterable[bytes]` into `httpx.AsyncClient.post(..., content=...)`.
+The body head (model, temperature, tools, stream_options) serializes
+once; then one `json.dumps(msg)` per message, yielded into the socket
+write. Each message's bytes can be GC'd before the next one is
+serialized. The "third copy" of the prompt list — the contiguous JSON
+string that used to coexist with the Python list at the moment of send
+— never exists.
 
-**Effect combined with Steps A+B:** per-subagent peak drops from the
-current ~3× prompt-size (list + JSON + httpx buffer) to roughly 1×
-prompt content + small streaming buffers. Memory-model-doc-original
-estimate of "a few hundred KB plus unavoidable HTTP buffers" per
-active subagent.
+`LiteLLMProvider` was not migrated to this shape; its callers still
+pay the snapshot cost. The deployed openclaw turn path uses
+`provider-openai`, so Step B is realised in production.
 
-### Step C — no SessionManager cache
+### ~~Step C — no SessionManager cache~~ [SHIPPED, opt-in]
 
-`SessionManager` currently holds sessions in a `WeakValueDictionary`;
-as long as any caller has a strong ref, the session (with its full
-`messages: list`) stays resident. Change the contract: every read
-reads from disk via `mmap` or a line iterator. No session object
-owns a Python list of all messages.
+*exoclaw-conversation 0.18.0 · exoclaw-nanobot 0.25.0 · exoclaw 0.23.0*
 
-`DefaultConversation.load_persisted_history` becomes a generator of
-fresh dicts parsed from the JSONL on demand. Hot pages end up in the
-OS page cache (see "Cgroup accounting" above), not Python heap.
+`SessionManager(streaming_history=True)` no longer populates
+`session.messages` from JSONL on `_load`. The unconsolidated tail
+lives only on disk; `read_history(key, max_messages=N)` reads it
+on demand via `load_range`. `_prepare_turn` skips
+`session.messages.append` under streaming so the in-memory list
+stays empty across turns.
 
-Touches: `SessionManager`, `DefaultConversation`, any code that
-holds onto the session object expecting `.messages` to be mutable.
-The in-progress turn's new messages can't live on the session
-object anymore — they're the executor's delta (phase 2a already
-put them there).
+The `HistoryStore` Protocol grew an additive `read_history` method
+with a default impl that materializes via `session.get_history` —
+non-streaming backends keep working unchanged. DB-backed backends
+implement `read_history` (and `load_range`) via cursor.
 
-**Effect combined with A+B+C:** the only Python-heap state per
-active subagent is the coroutine frame, the delta (messages
-produced this turn), loaded skill content, and in-flight HTTP
-buffers. For a turn with no tool-result explosions, that's
-~50–200 KB per subagent vs. today's ~2–5 MB.
+`MemoryStore` takes an optional `history` ref so legacy
+`consolidate()` and the boundary-repair pass in `consolidate_messages`
+fall back to `load_range` when `session.messages` is empty.
+`SummarizingConsolidationPolicy.should_consolidate` switched to
+`session.total_messages` so the consolidation trigger is correct
+under streaming.
 
-### Step D — streaming tool results
+`DirectExecutor.build_prompt` learned the same lazy-`PriorSource`
+auto-wire `DBOSExecutor` had since 0.13.1, so the win is realised
+on either executor backend.
 
-Tool results today return synchronously as a `str` held by the
-Python frame until the next `_chat_step` consumes it. A 50 KB
-web-fetch result, a 500 KB database query result — all held in the
-message list until end of turn.
+`nanobot.app.create()` constructs `SessionManager(streaming_history=True)`
+by default, so the deployed bot gets the win automatically. The flag
+defaults `False` at the `SessionManager` constructor level for
+back-compat with five `TestSessionManager` tests that read
+`session.messages` after a fresh `_load`.
 
-Would require a tool-protocol change to let tools stream their
-output (async iterator returning chunks). The executor's tool-step
-would persist chunks to a tool-result scratch file as they arrive
-and pass the file handle to the next LLM call instead of the full
-content. Tools that return small responses (`bool`, short strings)
-stay inline; the rewrite is only for tools that legitimately produce
-multi-MB results.
+**Empirical (from `packages/exoclaw-nanobot/scripts/`):**
+- `memory_loadtest.py`: single chat × 400 turns, tracemalloc current
+  is dead flat at ~600 KiB across all 400 turns under streaming;
+  cached climbs linearly to ~1056 KiB.
+- `memory_loadtest_concurrent.py`: at N=64 concurrent in-flight chats
+  with 100 turns of pre-seeded history each, post-turn baseline is
+  ~10,735 KiB cached vs ~783 KiB streaming. ~13.7× reduction.
+
+The in-flight peak (during `chat()`) is unchanged by Step C alone —
+that's Step B territory and was already shipped.
+
+**Follow-up not covered:** flip the default to `True` and delete the
+`False` branch + the five `TestSessionManager` tests it props up,
+once a soak window confirms no regressions. ~30-line cleanup.
+
+### Step D — streaming tool results [REMAINING]
+
+With A+B+C shipped, **Step D is the last load-bearing memory-model
+item.** Tool results today return synchronously as a `str` held by
+the Python frame until the next `_chat_step` consumes it. A 50 KB
+web-fetch, a 500 KB database query, a multi-MB document read — all
+held in the message list at full size until end of turn. On a
+multi-tenant cgroup, a single fat tool result on one session can
+crowd out idle sessions across the host. On a small-target single-
+tenant deployment (see "Aspirational target" below), it can blow
+the box.
+
+The fix: tool-protocol change to let tools stream their output (async
+iterator returning chunks). The executor's tool-step persists chunks
+to a per-tool-call scratch file as they arrive and passes a file
+handle to the next LLM call instead of the full content. Step B's
+`AsyncIterable[bytes]` request body already accepts file-backed
+input — so the executor → provider piping is already in place; what's
+missing is the tool-side output protocol and the executor's
+tool-step disk-write.
+
+Tools that return small responses (`bool`, short strings, status
+messages) stay inline. The rewrite is only for tools that
+legitimately produce multi-MB results: web-fetch, exec stdout,
+database queries, file reads, MCP tool returns over a certain
+threshold. Most tools fall on the "small" side and don't change.
+
+Approximate effort: 1-2 weeks. Touches: tool protocol (`Tool.execute`
+becomes optionally async-iterable), `Executor.execute_tool`
+implementations on `DirectExecutor` + `DBOSExecutor`, the providers'
+message-payload assembly to read from file when given a handle, and
+the few large-output tools (`WebFetchTool`, `ExecTool`, MCP wrapper).
 
 ### Step E — workflow-frame eviction (Temporal-style)
 
@@ -341,16 +380,83 @@ with ~1 MB of prompt history and ~3 LLM iterations:
 
 | Scenario | Peak per subagent | 8 concurrent | Fits 512 MiB? |
 |---|---|---|---|
-| Current (exoclaw 0.20.1 — 2b realised) | ~5 MB peak, ~2 MB between iterations | ~40 MB peak, ~16 MB avg | yes, comfortably |
-| Step B added | ~2 MB peak | ~16 MB | yes, with headroom |
-| Steps B+C | ~200 KB peak | ~1.6 MB | trivially |
-| Steps B+C+D | ~100 KB peak | ~800 KB | trivially |
-| Steps B–E | ~0 (only active-step frames resident) | bounded by external queue | dropped the question |
+| Pre-2b (exoclaw <0.20.1) | ~5 MB peak, ~2 MB between iterations | ~40 MB peak, ~16 MB avg | yes, comfortably |
+| ~~Step B added~~ [SHIPPED] | ~2 MB peak | ~16 MB | yes, with headroom |
+| ~~Steps B+C~~ [SHIPPED — current state] | ~200 KB peak, ~constant between turns | ~1.6 MB peak; **post-turn baseline ~constant in N** | trivially |
+| Steps B+C+D | ~100 KB peak (no fat tool result inflation) | ~800 KB | trivially |
+| Steps B+C+D + dep prune | minimum-CPython floor (~25-30 MiB process RSS for 1+ sessions) | n/a — bounded by N-independent cost | trivially |
 
-"8 concurrent" is openclaw's current `SUBAGENT_MAX_CONCURRENT`.
-With B shipped, that cap could probably move to 50–100 without
-the cgroup binding. With B+C, the cap becomes an LLM
-rate-limit / budget question, not a memory one.
+"8 concurrent" is openclaw's `SUBAGENT_MAX_CONCURRENT` cap. With
+B+C shipped (the current production state), the cap is an LLM
+rate-limit / budget question, not a memory one. The empirical
+post-turn baseline is now ~constant per host in N.
+
+## Aspirational target — the small-board litmus test
+
+Useful even though we don't sell on it: **can a single-tenant
+nanobot run on a board you'd hold in one hand?** A coherent
+yes-answer means the memory work is done in the meaningful sense.
+
+Two reference targets, in order of decreasing ambition:
+
+- **Pi Zero 2 W (512 MiB RAM, ~$15) — CPython.** With Steps B+C
+  shipped (today) plus a dep prune (see below), single-tenant
+  nanobot fits comfortably. ~30-50 MiB RSS for the agent, plenty
+  of headroom for httpx / TLS / OS. Probably reachable now once
+  someone tests it.
+
+- **ESP32-S3 + 8 MiB PSRAM, MicroPython.** This is the real
+  stretch goal. CPython's interpreter floor (~12-15 MiB just for
+  imports) makes 8 MiB unreachable inside CPython. The aspirational
+  checkpoint is: **could the same protocols, with different
+  implementations of the bottom layer, run on MicroPython?**
+
+What the MicroPython checkpoint requires (none of it research, all
+of it portability work):
+
+1. **Step D shipped** so a single fat tool result can't blow the box.
+2. **Dep prune** — make `pydantic`, `structlog`, `loguru`, `litellm`,
+   `pydantic-settings`, `dbos` truly optional via `try: import` at
+   the call site, not at module load. The deployed bot doesn't need
+   any of them strictly; nanobot's config layer is the only hard
+   `pydantic` user. Move config to `TypedDict` + a 50-line validator.
+   ~5 days.
+3. **Concurrency-isolation shim** — `asyncio.ContextVar` is
+   load-bearing for prior/delta isolation, structlog binding, DBOS
+   context. Single-tenant single-flight target doesn't need this;
+   add a `runtime.task_local()` shim that's `ContextVar` on CPython,
+   plain global on micro. ~½ day.
+4. **`MicroOpenAIProvider`** — new tiny package, ~200-300 lines.
+   `usocket` + `ussl` + hand-rolled SSE parser. Strict subset of
+   `exoclaw-provider-openai`'s `_stream_body` shape (which already
+   yields one message at a time, perfect for the micro target).
+   No router, no fallback chain, no cache-control stamping. ~3 days.
+5. **Drop `weakref.WeakValueDictionary`** from `SessionManager`
+   under streaming (the cache is nearly useless after Step C
+   anyway). LRU dict or no cache at all. ~½ day.
+6. **`DirectExecutor` only** — MicroPython has no `DBOS`, no
+   Postgres, no threading model that matters. Drop durability for
+   the micro target; rely on the JSONL flush already in phase 1.
+
+Total porting cost above: roughly 2 focused weeks once Step D is
+done. The exoclaw `Executor` and `LLMProvider` protocols are
+already designed for this — `DirectExecutor` and `DBOSExecutor`
+coexist today, `LiteLLMProvider` and `OpenAIProvider` coexist
+today. A `MicroOpenAIProvider` is just a third sibling at the
+provider layer.
+
+**Why this is a useful target even if we never deploy it:** every
+item on the list is also a memory or portability win for the
+production-server case. Step D bounds tool-result blow-ups under
+multi-tenant pressure. The dep prune lets us boot faster and use
+less RAM at idle. The `task_local` shim makes the isolation story
+explicit instead of implicit. The micro provider is a leaner
+fallback when LiteLLM is unwanted. None of this work is wasted on
+the production deployment.
+
+The implicit checkpoint: **once Step D ships and a Pi Zero 2 W
+demo works, the headline memory work is done.** ESP32-S3 / micro
+is a follow-up reachable from there with portability discipline.
 
 ## Practical implications
 
@@ -358,40 +464,42 @@ rate-limit / budget question, not a memory one.
   after phase 1+2. Durability is a recovery property. RAM still
   matters for concurrent fan-out.
 - Concurrent capacity per host is `total_cgroup_memory /
-  per_subagent_peak`. Today ≈ 5 MB per active subagent under the
-  phase 2b overwrite bug; Step A unblocking gets that structurally
-  down without other code changes, but doesn't change peak (which is
-  dominated by the httpx-send tripling described in "The `_messages`
-  buffer" above).
-- **Steps A and B are the near-term work with the biggest
-  return-per-effort.** A is a one-line core fix. B is the phase 3
-  streaming-httpx-body work; a few days touching the provider
-  protocol. Together they drop peak enough that openclaw's 512 MiB
-  cgroup stops being the binding constraint on subagent fan-out.
+  per_subagent_peak`. With A+B+C shipped (current state), the
+  per-session post-turn baseline is ~constant in session length and
+  ~constant in N concurrent sessions. The cap on host capacity is
+  now in-flight peak — bounded by Step D for tool-result blowouts.
+- **Step D is the remaining near-term work** with meaningful
+  return-per-effort: bounds tool-result inflation across the
+  multi-tenant turn path, and is the prerequisite for the
+  small-board aspirational target.
 - Capping subagent concurrency in the spawner (see
-  `SubagentSpawner.max_concurrent`) is the short-term cushion. It's
-  not a bug that this cap exists; it's that the cap should be set
-  by LLM rate limits and budget, not by RAM.
+  `SubagentSpawner.max_concurrent`) is no longer the load-bearing
+  cushion it was — with B+C shipped the cap is an LLM rate-limit
+  / budget question, not a memory one. Keep it set by those
+  considerations, not RAM headroom.
 
 ## When to revisit
 
 Signals that push us to the next step:
 
-- **Step A (unblock phase 2b)**: should be done unconditionally — it's
-  a one-line fix to realise RAM reduction already in the codebase.
-- **Step B (streaming request body)**: do when any single subagent's
-  peak during the LLM call crosses ~10 MB (very large history, long
-  tool results stacking up, or a subagent doing many iterations).
-- **Step C (no SessionManager cache)**: do when a single session's
-  history JSONL grows past ~5 MB and `get_or_create` holding it in
-  RAM affects memory headroom across concurrent sessions.
+- ~~**Step A (unblock phase 2b)**~~ — shipped, exoclaw 0.20.1.
+- ~~**Step B (streaming request body)**~~ — shipped via
+  `exoclaw-provider-openai`. The deployed openclaw turn path
+  uses it.
+- ~~**Step C (no SessionManager cache)**~~ — shipped opt-in
+  (`streaming_history=True`); on by default in `nanobot.app`.
+  Empirically: ~13.7× post-turn baseline reduction at N=64
+  concurrent sessions.
 - **Step D (streaming tool results)**: do when a tool legitimately
   needs to return multi-MB results (video transcripts, large
   document processing, bulk DB exports) and holding them in the
-  message buffer starves other work.
+  message buffer starves other work — *or* when the small-board
+  target becomes a serious goal. With A+B+C shipped, D is the
+  load-bearing remaining piece.
 - **Step E (workflow-frame eviction)**: do when subagent fan-out
   needs to scale past ~100 concurrent on a single host, or when a
   Temporal-executor plugin shows up and inherits this for free.
+  Not on the small-board path — single-tenant has nothing to evict.
 - **Step F (per-step ephemeral processes)**: do when none of the
   above are enough and per-activity latency-tolerance is high
   (think: overnight batch workflows, not interactive agents).

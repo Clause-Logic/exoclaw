@@ -190,46 +190,49 @@ else:  # pragma: no cover (micropython)
 def make_scratch_path(prefix: str = "tmp-", suffix: str = "", dir: str | None = None) -> str:
     """Return a path to a freshly-created empty scratch file.
 
-    Cross-runtime replacement for ``tempfile.mkstemp`` that doesn't
-    require ``os.open`` flag constants (MicroPython 1.27 doesn't
-    expose ``O_CREAT`` / ``O_EXCL`` / ``O_RDWR``). The file is
-    created as a zero-byte placeholder so subsequent ``open(path,
-    mode)`` calls find it; the caller is responsible for unlinking
-    when done — same lifetime contract as ``tempfile.mkstemp``.
+    Cross-runtime replacement for ``tempfile.mkstemp`` — MicroPython
+    1.27 doesn't expose ``O_CREAT`` / ``O_EXCL`` / ``O_RDWR``, so the
+    micro branch builds a path manually and creates a placeholder
+    with ``open("w")``; the CPython branch delegates to ``tempfile``
+    directly so it gets exclusive-create + Windows-safe path joining.
+    The caller is responsible for unlinking when done — same
+    lifetime contract as ``tempfile.mkstemp``.
 
     ``dir`` defaults to the platform tempdir on CPython, ``/tmp``
     on MicroPython. On flash-only MicroPython boards, pass an
     explicit writable directory (e.g. workspace root).
-
-    Filename randomness uses ``random_bytes(8)`` — 64 bits, plenty
-    for collision avoidance under the kind of fan-out exoclaw runs.
     """
-    if dir is None:
-        if IS_MICROPYTHON:  # pragma: no cover (cpython)
-            base = "/tmp"
-        else:  # pragma: no cover (micropython)
-            from tempfile import gettempdir
+    if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+        # CPython: ``tempfile.mkstemp`` handles cross-platform path
+        # joining and uses an exclusive-create flag (``O_CREAT |
+        # O_EXCL``) that closes the symlink / pre-create race that
+        # ``open(path, "w")`` would leave open on a shared tmpdir.
+        from tempfile import mkstemp
 
-            base = gettempdir()
-    else:
+        fd, path = mkstemp(prefix=prefix, suffix=suffix, dir=dir)
+        os.close(fd)
+        return path
+
+    # MicroPython branch: build the path manually with a 64-bit
+    # random suffix (``random_bytes(8)``) and create a zero-byte
+    # placeholder. ``"x"`` (exclusive create) isn't supported on
+    # 1.27, so ``"w"`` is the best we can do — the suffix
+    # dominates the race window enough for the cooperative
+    # single-task target this branch runs on.
+    if dir is None:  # pragma: no cover (cpython)
+        base = "/tmp"
+    else:  # pragma: no cover (cpython)
         base = dir
-    base = base.rstrip("/") or "/"
-    try:
+    base = base.rstrip("/") or "/"  # pragma: no cover (cpython)
+    try:  # pragma: no cover (cpython)
         os.mkdir(base)
-    except OSError:
+    except OSError:  # pragma: no cover (cpython)
         pass  # already exists or read-only; the open below will fail loudly
-    rand = "".join("{:02x}".format(b) for b in random_bytes(8))
-    sep = "" if base.endswith("/") else "/"
-    path = base + sep + prefix + rand + suffix
-    # ``"x"`` (exclusive create) would be cleaner but isn't
-    # supported on MicroPython 1.27. ``"w"`` instead — the random
-    # 64-bit suffix from ``random_bytes(8)`` makes a same-second
-    # collision astronomically unlikely on a single-threaded
-    # target, and on multi-threaded CPython the suffix dominates
-    # the race window the same way ``tempfile`` does. Acceptable
-    # tradeoff for cross-runtime portability.
-    open(path, "w").close()
-    return path
+    rand = "".join("{:02x}".format(b) for b in random_bytes(8))  # pragma: no cover (cpython)
+    sep = "" if base.endswith("/") else "/"  # pragma: no cover (cpython)
+    path = base + sep + prefix + rand + suffix  # pragma: no cover (cpython)
+    open(path, "w").close()  # pragma: no cover (cpython)
+    return path  # pragma: no cover (cpython)
 
 
 # ── Logger ───────────────────────────────────────────────────────────────────

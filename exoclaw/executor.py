@@ -43,6 +43,78 @@ def _empty_prior_source() -> list[dict[str, object]]:
     return []
 
 
+def _build_lazy_prior_source(
+    *,
+    full: list[dict[str, object]],
+    history_snapshot: list[dict[str, object]],
+    reload_history: Callable[[], list[dict[str, object]]],
+) -> PriorSource | None:
+    """Construct a disk-backed ``PriorSource`` for a turn's prior history.
+
+    Locates ``history_snapshot`` inside ``full`` as a contiguous sublist
+    by DICT-EQUALITY match (not ``id()``). This is the critical detail
+    for working against real Conversation impls:
+    ``DefaultConversation.session.get_history`` strips timestamps /
+    consolidation fields and returns FRESH dict objects per call, so
+    call-#1 (from ``build_prompt``) and call-#2 (from
+    ``load_persisted_history``) return dicts with the same content but
+    different ``id()``.
+
+    Returns ``None`` when no contiguous match is found (empty history,
+    a PromptBuilder that transforms messages, isolated mode). The
+    caller then falls back to the closure-over-list snapshot path
+    (``set_messages``).
+
+    The returned source closes over ``prefix`` and ``suffix`` (small,
+    stable for the turn) and invokes ``reload_history`` on each call.
+    RAM savings come from the history slice — usually the bulk of
+    prompt size — not being heap-resident between LLM iterations.
+
+    Mirrors the helper in ``exoclaw_executor_dbos.executor`` — both
+    executors implement the same phase 2b auto-wire so the
+    ``streaming_history``-backed Conversation works under either.
+    """
+    # Defensive type guard: tests routinely pass a bare ``MagicMock``
+    # as ``conversation``, in which case ``load_persisted_history``
+    # resolves to an auto-mock and ``loader(...)`` returns a Mock —
+    # which is truthy, ``len()``-able (returns 0), and indexable
+    # (returns more Mocks). Without this check we'd silently install
+    # a bogus prior source on every Mock'd test. Real impls return
+    # ``list[dict[str, object]]``; refuse anything else.
+    if not isinstance(history_snapshot, list):
+        return None
+    if not history_snapshot:
+        return None
+    n = len(history_snapshot)
+    if n > len(full):
+        return None
+    # Element-wise compare rather than ``full[i:i+n] == history_snapshot``
+    # — slicing allocates a fresh list on every iteration. For a large
+    # ``full`` with a large history window, that's a lot of short-lived
+    # lists on the hot ``build_prompt`` path.
+    first_item = history_snapshot[0]
+    first_idx: int | None = None
+    for i in range(len(full) - n + 1):
+        if full[i] != first_item:
+            continue
+        for j in range(1, n):
+            if full[i + j] != history_snapshot[j]:
+                break
+        else:
+            first_idx = i
+            break
+    if first_idx is None:
+        return None
+    last_idx = first_idx + n - 1
+    prefix = list(full[:first_idx])
+    suffix = list(full[last_idx + 1 :])
+
+    def _source() -> list[dict[str, object]]:
+        return [*prefix, *reload_history(), *suffix]
+
+    return _source
+
+
 def _supports_append(conversation: Conversation) -> TypeGuard[AppendableConversation]:
     """Return True if the Conversation implements ``append`` as a real
     coroutine. Narrows the static type to ``AppendableConversation`` so
@@ -467,6 +539,32 @@ class DirectExecutor:
             plugin_context=plugin_context,
             **kwargs,
         )
+        # Phase 2b auto-wire: when the Conversation exposes a sync
+        # ``load_persisted_history(session_id)``, install a disk-backed
+        # ``PriorSource`` so the history slice is re-read per
+        # ``load_messages`` call instead of being heap-resident in
+        # ``_prior_var`` for the whole turn (and bleeding into the
+        # *next* turn until ``set_messages`` runs again).
+        #
+        # Falls back to ``set_messages`` when:
+        #   * the conversation doesn't expose ``load_persisted_history``,
+        #   * the loader returns an empty history (nothing to be lazy
+        #     about),
+        #   * ``_build_lazy_prior_source`` can't locate the history
+        #     slice in ``messages`` (a PromptBuilder transformed it,
+        #     isolated mode dropped it, etc.).
+        # See ``docs/memory-model.md`` phase 2b / Step C.
+        loader = getattr(conversation, "load_persisted_history", None)
+        if callable(loader) and not asyncio.iscoroutinefunction(loader):
+            history_snapshot = loader(session_id)
+            source = _build_lazy_prior_source(
+                full=messages,
+                history_snapshot=history_snapshot,
+                reload_history=lambda: loader(session_id),
+            )
+            if source is not None:
+                self.set_prior_source(source)
+                return messages
         self.set_messages(messages)
         return messages
 

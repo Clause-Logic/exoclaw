@@ -532,9 +532,13 @@ class TestDirectExecutorBuildPrompt:
         await executor.build_prompt(conversation, "s:1", "u")
 
         # Async loader is rejected — fell back to set_messages snapshot.
-        # The async mock must NOT have been called (we never enter the
-        # auto-wire branch when the loader is a coroutine function).
-        conversation.load_persisted_history.assert_not_awaited()
+        # ``assert_not_called`` rather than ``assert_not_awaited``: the
+        # latter still passes if the loader was *called* but the
+        # returned coroutine was never awaited, which is exactly the
+        # un-awaited-coroutine regression this branch is meant to
+        # prevent. The auto-wire must short-circuit at the
+        # ``iscoroutinefunction`` check, before any call to the loader.
+        conversation.load_persisted_history.assert_not_called()
         assert executor.load_messages() == msgs
 
     async def test_build_prompt_falls_back_when_history_not_contiguous(self) -> None:

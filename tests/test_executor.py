@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
 from exoclaw.agent.tools.protocol import ToolContext
+from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.executor import DirectExecutor, Executor
 
 
@@ -567,6 +569,210 @@ class TestDirectExecutorBuildPrompt:
         assert executor.load_messages() == full
         # Loader was consulted exactly once during build_prompt.
         assert conversation.load_persisted_history.call_count == 1
+
+
+class TestDirectExecutorStreamingTool:
+    """Step D: tools that opt into ``execute_streaming`` get drained
+    into a per-turn scratch file. The tool message gets a path
+    reference so the provider can stream from disk during request
+    body assembly. Tools without ``execute_streaming`` keep going
+    through the legacy inline path.
+    """
+
+    async def test_inline_path_when_tool_has_no_execute_streaming(self) -> None:
+        """Default behaviour — no opt-in, inline result, no scratch file."""
+        from pathlib import Path
+
+        from exoclaw.executor import ToolResult
+
+        executor = DirectExecutor()
+        registry = ToolRegistry()
+
+        class _Plain:
+            name = "plain"
+            description = "no streaming"
+            parameters: dict[str, object] = {"type": "object", "properties": {}}
+
+            async def execute(self, **kwargs: object) -> str:
+                return "inline-result"
+
+        registry.register(_Plain())
+
+        outcome = await executor.execute_tool_with_handle(registry, "plain", {})
+
+        assert isinstance(outcome, ToolResult)
+        assert outcome.content == "inline-result"
+        assert outcome.content_file is None
+        assert not isinstance(outcome.content_file, Path)
+
+    async def test_streaming_drains_chunks_to_scratch_file(self) -> None:
+        """Tool with ``execute_streaming`` writes chunks to disk; the
+        returned ``ToolResult`` carries the path."""
+        from pathlib import Path
+
+        executor = DirectExecutor()
+        registry = ToolRegistry()
+
+        class _Streaming:
+            name = "streamer"
+            description = "streams"
+            parameters: dict[str, object] = {"type": "object", "properties": {}}
+
+            async def execute(self, **kwargs: object) -> str:
+                # Should NOT be called when execute_streaming exists.
+                raise AssertionError("inline execute should be skipped")
+
+            async def execute_streaming(self, **kwargs: object) -> AsyncIterator[str]:
+                # Big enough to overflow the 256-byte preview budget,
+                # so the truncation footer kicks in.
+                yield "x" * 300
+                yield "y" * 300
+
+        registry.register(_Streaming())
+
+        outcome = await executor.execute_tool_with_handle(registry, "streamer", {})
+
+        assert outcome.content_file is not None
+        assert isinstance(outcome.content_file, Path)
+        assert outcome.content_file.exists()
+        assert outcome.content_file.read_text() == "x" * 300 + "y" * 300
+        # Preview captures the head + a stream-size footer.
+        assert "xxx" in outcome.content
+        assert "streamed 600 bytes" in outcome.content
+
+    async def test_post_turn_cleans_up_scratch_files(self) -> None:
+        """Scratch files from streaming tool calls live for the
+        duration of the turn and get unlinked at ``post_turn``."""
+        executor = DirectExecutor()
+        registry = ToolRegistry()
+
+        class _Streaming:
+            name = "streamer"
+            description = "streams"
+            parameters: dict[str, object] = {"type": "object", "properties": {}}
+
+            async def execute(self, **kwargs: object) -> str:
+                return ""
+
+            async def execute_streaming(self, **kwargs: object) -> AsyncIterator[str]:
+                yield "data"
+
+        registry.register(_Streaming())
+
+        # Run twice — both scratch files get registered.
+        a = await executor.execute_tool_with_handle(registry, "streamer", {})
+        b = await executor.execute_tool_with_handle(registry, "streamer", {})
+        assert a.content_file is not None and a.content_file.exists()
+        assert b.content_file is not None and b.content_file.exists()
+        assert a.content_file != b.content_file
+
+        # Conversation argument doesn't matter for cleanup — we only
+        # care that the scratch list gets drained.
+        from unittest.mock import MagicMock
+
+        await executor.post_turn(MagicMock(spec=[]), "session:1")
+
+        assert not a.content_file.exists()
+        assert not b.content_file.exists()
+
+    async def test_dispatch_registry_bound_during_streaming(self) -> None:
+        """Fan-out tools that call ``ToolRegistry.current()`` from
+        inside ``execute_streaming`` must see the dispatching
+        registry, just like ``execute`` provides during the inline
+        path. Without ``bind_dispatch`` the streaming path would
+        bypass the binding and ``current()`` would return ``None``.
+        """
+        executor = DirectExecutor()
+        registry = ToolRegistry()
+
+        seen: list[ToolRegistry | None] = []
+
+        class _PeekingStream:
+            name = "peeker"
+            description = "checks current registry"
+            parameters: dict[str, object] = {"type": "object", "properties": {}}
+
+            async def execute(self, **kwargs: object) -> str:
+                return ""
+
+            async def execute_streaming(self, **kwargs: object) -> AsyncIterator[str]:
+                seen.append(ToolRegistry.current())
+                yield "ok"
+
+        registry.register(_PeekingStream())
+
+        await executor.execute_tool_with_handle(registry, "peeker", {})
+
+        assert seen == [registry]
+
+    async def test_unsafe_tool_call_id_does_not_break_filename(self) -> None:
+        """LLM-supplied ``tool_call_id`` may contain path separators or
+        other unusual characters. The executor sanitizes to alnum +
+        ``-`` / ``_`` and caps at 64 chars before letting it near
+        ``mkstemp``."""
+        executor = DirectExecutor()
+        registry = ToolRegistry()
+
+        class _Stream:
+            name = "s"
+            description = ""
+            parameters: dict[str, object] = {"type": "object", "properties": {}}
+
+            async def execute(self, **kwargs: object) -> str:
+                return ""
+
+            async def execute_streaming(self, **kwargs: object) -> AsyncIterator[str]:
+                yield "x"
+
+        registry.register(_Stream())
+
+        outcome = await executor.execute_tool_with_handle(
+            registry,
+            "s",
+            {},
+            tool_call_id="../../../etc/passwd\x00\n",
+        )
+
+        assert outcome.content_file is not None
+        # No path separator / null / newline in the resolved scratch path.
+        assert "/etc/passwd" not in str(outcome.content_file)
+        assert "\x00" not in str(outcome.content_file)
+        assert "\n" not in str(outcome.content_file)
+
+    async def test_protocol_default_returns_inline_toolresult(self) -> None:
+        """Executors that don't override ``execute_tool_with_handle``
+        get the Protocol default — calls ``execute_tool`` and wraps
+        the string with no ``content_file``. Verifies the back-compat
+        contract for external Executor implementations."""
+        from exoclaw.executor import Executor, ToolResult
+
+        class _LegacyExecutor:
+            handles_response_send = False
+            handles_inbound_enqueue = False
+
+            async def execute_tool(
+                self,
+                registry: ToolRegistry,
+                name: str,
+                params: dict[str, object],
+                ctx: ToolContext | None = None,
+                *,
+                tool_call_id: str | None = None,
+            ) -> str:
+                return "legacy-string"
+
+        # Use the Protocol default — bind the bound method explicitly.
+        legacy = _LegacyExecutor()
+        outcome = await Executor.execute_tool_with_handle(
+            legacy,  # type: ignore[arg-type]
+            ToolRegistry(),
+            "x",
+            {},
+        )
+
+        assert isinstance(outcome, ToolResult)
+        assert outcome.content == "legacy-string"
+        assert outcome.content_file is None
 
 
 class TestDirectExecutorRecord:

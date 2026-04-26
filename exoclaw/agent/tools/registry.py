@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
+from collections.abc import Iterator
 
 from exoclaw.agent.tools.protocol import Tool, ToolContext
 
@@ -115,16 +117,10 @@ class ToolRegistry:
         """
         _hint = "\n\n[Analyze the error above and try a different approach.]"
 
-        tool = self._tools.get(name)
-        if not tool:
-            return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
-
-        if hasattr(tool, "cast_params"):
-            params = getattr(tool, "cast_params")(params)
-        if hasattr(tool, "validate_params"):
-            errors: list[str] = getattr(tool, "validate_params")(params)
-            if errors:
-                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
+        resolved = self._resolve(name, params)
+        if isinstance(resolved, str):
+            return resolved
+        tool, params = resolved
 
         token = _dispatch_registry.set(self)
         try:
@@ -138,6 +134,78 @@ class ToolRegistry:
         if isinstance(result, str) and result.startswith("Error"):
             return result + _hint
         return result
+
+    def stream_dispatch(
+        self, name: str, params: dict[str, object]
+    ) -> tuple[Tool, dict[str, object]] | str:
+        """Resolve a tool call for a potential streaming path without
+        invoking it.
+
+        Returns the same shape as :meth:`_resolve`:
+        ``(tool, validated_params)`` when the tool exists and the
+        parameters are valid, or an error string for unknown tools /
+        invalid params. This helper does **not** check whether the
+        resolved tool implements ``execute_streaming`` — callers
+        (typically ``DirectExecutor.execute_tool_with_handle``)
+        inspect the returned tool themselves before starting any
+        async iteration, and use :meth:`bind_dispatch` to mirror the
+        ``_dispatch_registry`` ContextVar binding that
+        :meth:`execute` would have provided.
+
+        Kept separate from :meth:`execute` because the streaming path
+        is invoked from the executor, not the registry — the executor
+        owns the scratch file lifecycle and needs the iterator to
+        consume chunks one at a time. Doing the streaming dispatch
+        inside the registry would force the registry to know about
+        scratch files, which is the executor's concern.
+        """
+        return self._resolve(name, params)
+
+    @contextlib.contextmanager
+    def bind_dispatch(self) -> Iterator[None]:
+        """Bind ``self`` into ``_dispatch_registry`` for the body of
+        the context.
+
+        The streaming executor path bypasses :meth:`execute`, which
+        normally sets ``_dispatch_registry`` for the duration of the
+        tool body. Without this binding, fan-out tools that call
+        :meth:`ToolRegistry.current` from inside their
+        ``execute_streaming`` body would see ``None`` and break
+        (``BatchTool``, ``ReduceTool``, anything that looks up
+        sibling tools by name). The token is restored on exit so
+        nested dispatches compose correctly — same semantics as
+        :meth:`execute`'s set/reset pair.
+        """
+        token = _dispatch_registry.set(self)
+        try:
+            yield
+        finally:
+            _dispatch_registry.reset(token)
+
+    def _resolve(
+        self, name: str, params: dict[str, object]
+    ) -> tuple[Tool, dict[str, object]] | str:
+        """Shared lookup + cast + validate for both execute paths.
+
+        Returns ``(tool, params)`` on success or a ready-to-return
+        error string on failure. Hint suffix is applied in
+        ``execute``; the streaming caller appends its own hint or
+        returns the error inline.
+        """
+        _hint = "\n\n[Analyze the error above and try a different approach.]"
+
+        tool = self._tools.get(name)
+        if not tool:
+            return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
+
+        if hasattr(tool, "cast_params"):
+            params = getattr(tool, "cast_params")(params)
+        if hasattr(tool, "validate_params"):
+            errors: list[str] = getattr(tool, "validate_params")(params)
+            if errors:
+                return f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors) + _hint
+
+        return tool, params
 
     @classmethod
     def current(cls) -> "ToolRegistry | None":

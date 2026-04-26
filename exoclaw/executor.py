@@ -8,11 +8,16 @@ retry strategies, or execution environments).
 from __future__ import annotations
 
 import asyncio
+import inspect
+import os
 import secrets
+import tempfile
 import threading
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeGuard, runtime_checkable
 
 from exoclaw.agent.conversation import AppendableConversation, Conversation
@@ -20,6 +25,31 @@ from exoclaw.agent.tools.protocol import ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import LLMResponse
+
+
+@dataclass
+class ToolResult:
+    """Result of a tool invocation, possibly file-backed.
+
+    Carries either the inline string result or a path to a scratch
+    file that holds the full output. Tools that implement the
+    ``execute_streaming`` opt-in capability (memory-model.md Step D)
+    drain into a scratch file as chunks arrive — the executor
+    returns ``ToolResult(content=<short preview>, content_file=<path>)``
+    and the agent loop attaches the path to the tool message so a
+    file-backed provider can stream the full content into the LLM
+    request body without ever materialising it as one Python string.
+
+    Tools without the streaming capability return
+    ``ToolResult(content=<full result>, content_file=None)`` — the
+    legacy inline path. ``content`` is always populated (with a
+    preview when ``content_file`` is set) so callers that don't look
+    at ``content_file`` still see something diagnostic.
+    """
+
+    content: str
+    content_file: Path | None = None
+
 
 if TYPE_CHECKING:
     from exoclaw.agent.loop import AgentLoop
@@ -228,6 +258,31 @@ class Executor(Protocol):
         tool_call_id: str | None = None,
     ) -> str: ...
 
+    async def execute_tool_with_handle(
+        self,
+        registry: ToolRegistry,
+        name: str,
+        params: dict[str, object],
+        ctx: ToolContext | None = None,
+        *,
+        tool_call_id: str | None = None,
+    ) -> ToolResult:
+        """Execute a tool, returning a possibly-file-backed result.
+
+        Default implementation calls :meth:`execute_tool` and wraps
+        the string result with no ``content_file`` — preserves the
+        legacy inline path for executors that don't override this.
+        Step-D-aware executors (``DirectExecutor``, future durable
+        executors) override to detect ``Tool.execute_streaming`` and
+        drain it into a scratch file.
+
+        Callers (the agent loop) should prefer this method so that
+        tools opting into the streaming capability get the
+        memory-model Step D win automatically.
+        """
+        result = await self.execute_tool(registry, name, params, ctx, tool_call_id=tool_call_id)
+        return ToolResult(content=result, content_file=None)
+
     async def build_prompt(
         self,
         conversation: Conversation,
@@ -406,6 +461,12 @@ class DirectExecutor:
         self._delta_var: ContextVar[list[dict[str, object]]] = ContextVar(
             f"exoclaw_executor_delta_{id(self)}"
         )
+        # Per-task list of scratch files written by streaming tool
+        # results during this turn. Cleaned up at ``post_turn``.
+        # See ``execute_tool_with_handle`` and memory-model.md Step D.
+        self._scratch_paths_var: ContextVar[list[Path]] = ContextVar(
+            f"exoclaw_executor_scratch_{id(self)}"
+        )
 
     def _get_prior_source(self) -> PriorSource:
         try:
@@ -518,6 +579,122 @@ class DirectExecutor:
     ) -> str:
         return await registry.execute(name, params, ctx)
 
+    async def execute_tool_with_handle(
+        self,
+        registry: ToolRegistry,
+        name: str,
+        params: dict[str, object],
+        ctx: ToolContext | None = None,
+        *,
+        tool_call_id: str | None = None,
+    ) -> ToolResult:
+        """Step D opt-in: detect ``Tool.execute_streaming`` and drain
+        chunks into a scratch file as they arrive, returning a
+        file-backed ``ToolResult``. Falls back to the inline
+        ``execute_tool`` path for tools that don't opt in.
+
+        Tools that *do* opt in are responsible for yielding chunks
+        no smaller than they'd want to commit to disk at once —
+        usually whatever line / record granularity their underlying
+        producer (subprocess stdout, HTTP body, file read) emits.
+        The executor never buffers more than the current chunk in
+        memory, so per-chunk size is the upper bound on transient
+        Python heap pressure for a single tool call.
+
+        ``execute_with_context`` and the streaming opt-in are
+        independent — a tool can have either, neither, or both.
+        Streaming wins when both are present (this version doesn't
+        pass ``ctx`` to ``execute_streaming``; tools that need
+        session context for streaming should add a future
+        ``execute_streaming_with_context`` overload).
+        """
+        resolved = registry.stream_dispatch(name, params)
+        if isinstance(resolved, str):
+            return ToolResult(content=resolved, content_file=None)
+        tool, validated = resolved
+
+        streamer = getattr(tool, "execute_streaming", None)
+        # Strict ``isasyncgenfunction`` check — a real streaming tool
+        # uses ``async def execute_streaming(...): yield ...`` which
+        # produces an async-generator function. Plain Mock auto-attrs
+        # (``MagicMock(spec=...)``-derived auto-attributes, bare
+        # ``Mock`` ``execute_streaming`` slots in tests) match
+        # ``callable()`` but not this stricter test, so they fall
+        # through to the inline path correctly. Tools that wrap an
+        # async iterator behind an ``async def`` (returning the
+        # iterator without yielding directly) need to add ``yield``
+        # somewhere in the body or convert via a small wrapper —
+        # documented on the ``Tool`` protocol.
+        if not inspect.isasyncgenfunction(streamer):
+            # Tool doesn't opt into streaming — inline path.
+            inline = await self.execute_tool(registry, name, params, ctx, tool_call_id=tool_call_id)
+            return ToolResult(content=inline, content_file=None)
+
+        # ``tool_call_id`` originates outside the executor (LLM /
+        # provider) and may contain path separators or other unusual
+        # bytes. Sanitize aggressively to ASCII alnum + ``-`` / ``_``
+        # and cap at 64 chars before letting it near a filesystem path.
+        suffix = ""
+        if tool_call_id:
+            safe = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in tool_call_id)[:64]
+            if safe:
+                suffix = f"-{safe}"
+
+        # Drain the async iterator into a per-turn scratch file.
+        # The file persists until ``post_turn`` cleans it up; the
+        # provider reads from it during request-body assembly.
+        fd, path_str = tempfile.mkstemp(prefix="exoclaw-tool-", suffix=f"{suffix}.txt")
+        path = Path(path_str)
+        bytes_written = 0
+        # Preview budget is enforced **in bytes**, not characters —
+        # ``bytes_written`` accounts in bytes, so mixing the two would
+        # let non-ASCII output exceed the cap. ``newline=""`` prevents
+        # Windows-style ``\n``→``\r\n`` translation that would also
+        # desync byte counts vs. on-disk size.
+        preview_chunks: list[bytes] = []
+        preview_budget = 256
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                # Bind ``self`` (the registry) into the dispatch
+                # ContextVar for the duration of the stream — fan-out
+                # tools that call ``ToolRegistry.current()`` from
+                # inside ``execute_streaming`` need this exactly the
+                # same way the inline ``execute`` path provides it.
+                with registry.bind_dispatch():
+                    async for chunk in streamer(**validated):
+                        if not isinstance(chunk, str):
+                            chunk = str(chunk)
+                        chunk_bytes = chunk.encode("utf-8")
+                        fh.write(chunk)
+                        bytes_written += len(chunk_bytes)
+                        if preview_budget > 0:
+                            take = min(preview_budget, len(chunk_bytes))
+                            preview_chunks.append(chunk_bytes[:take])
+                            preview_budget -= take
+        except Exception:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            raise
+
+        # Track for cleanup at ``post_turn``.
+        try:
+            scratch_paths = self._scratch_paths_var.get()
+        except LookupError:
+            scratch_paths = []
+            self._scratch_paths_var.set(scratch_paths)
+        scratch_paths.append(path)
+
+        # Reassemble preview as text. ``errors="ignore"`` covers the
+        # one edge case where the byte budget cut a multi-byte UTF-8
+        # codepoint mid-sequence — the resulting partial bytes are
+        # dropped from the preview rather than crashing the encode.
+        preview = b"".join(preview_chunks).decode("utf-8", errors="ignore")
+        if bytes_written > len(preview.encode("utf-8")):
+            preview = f"{preview}…\n[streamed {bytes_written} bytes to {path.name}]"
+        return ToolResult(content=preview, content_file=path)
+
     async def build_prompt(
         self,
         conversation: Conversation,
@@ -586,6 +763,24 @@ class DirectExecutor:
     ) -> None:
         if _supports_post_turn(conversation):
             await conversation.post_turn(session_id)
+        # Clean up any tool-result scratch files written during this
+        # turn. Holding them past the turn would leak — the provider
+        # has already serialised their content into the LLM request
+        # body, so by the time post_turn runs they're no longer
+        # referenced. Best-effort: a missing file is fine (manual
+        # cleanup, OS tmpwatch); other OSErrors get swallowed because
+        # we don't want a stat-style hiccup to break end-of-turn hooks.
+        try:
+            scratch_paths = self._scratch_paths_var.get()
+        except LookupError:
+            scratch_paths = []
+        for path in scratch_paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        if scratch_paths:
+            self._scratch_paths_var.set([])
 
     async def record(
         self,

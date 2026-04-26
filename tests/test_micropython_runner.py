@@ -46,7 +46,7 @@ _REPO_ROOT = Path(__file__).parent.parent
 _RUNNER = _REPO_ROOT / "tests" / "_micropython_runner" / "run.py"
 _MICRO_TESTS_DIR = _REPO_ROOT / "tests" / "micro"
 _STUBS_DIR = _REPO_ROOT / "tests" / "_micropython_stubs"
-_COMPAT_SRC = _REPO_ROOT / "exoclaw" / "_compat.py"
+_EXOCLAW_PKG = _REPO_ROOT / "exoclaw"
 
 _COVERAGE_THRESHOLD = 0.95
 
@@ -173,19 +173,33 @@ def _run_micropython_suite(binary: str, tmp_path: Path) -> dict:
     report regardless of test pass/fail, but exit 1 means at
     least one test failed; we return the report anyway so the
     caller can surface specific failures).
+
+    Stages the full ``exoclaw/`` package + vendored typing /
+    dataclasses / datetime stubs into ``tmp_path`` so the runner
+    imports the same source layout exoclaw ships with — no flat
+    copies, no ``import _compat`` shortcuts. Coverage is traced
+    against every ``.py`` under the staged ``exoclaw/`` so the MP
+    matrix entry covers the same source files as CPython's
+    coverage.py run.
     """
-    # Stage a flat layout so the runner's ``import _compat`` finds
-    # the shim without going through ``exoclaw/__init__.py``
-    # (which imports unmigrated CPython-only modules).
     stage = tmp_path / "stage"
     stage.mkdir()
-    shutil.copy(_COMPAT_SRC, stage / "_compat.py")
+    # Copy the full package preserving directory structure. The
+    # runner sets ``MICROPYPATH`` to the stage so ``import exoclaw``
+    # resolves through this copy.
+    shutil.copytree(_EXOCLAW_PKG, stage / "exoclaw")
+    # Vendored stubs sit at the stage root so ``import typing`` /
+    # ``import dataclasses`` / ``import datetime`` resolve to the
+    # stubs before MicroPython's frozen modules. ``.frozen`` stays
+    # earlier on the path so frozen ``asyncio`` still wins.
     for stub in _STUBS_DIR.glob("*.py"):
         shutil.copy(stub, stage / stub.name)
 
     env = os.environ.copy()
-    # Path to the staged shim + tests dir + runner imports.
-    env["MICROPYPATH"] = ":{stage}".format(stage=stage)
+    # ``.frozen`` first so MP's frozen ``asyncio`` resolves before
+    # anything in the stage; stage second so vendored stubs override
+    # any missing stdlib (``typing``, ``dataclasses``, ``datetime``).
+    env["MICROPYPATH"] = ".frozen:{stage}".format(stage=stage)
 
     result = subprocess.run(
         [
@@ -193,12 +207,12 @@ def _run_micropython_suite(binary: str, tmp_path: Path) -> dict:
             str(_RUNNER),
             "--tests-dir",
             str(_MICRO_TESTS_DIR),
-            "--cov",
-            str(stage / "_compat.py"),
+            "--cov-dir",
+            str(stage / "exoclaw"),
         ],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=120,
         env=env,
         cwd=str(_REPO_ROOT),
     )
@@ -222,7 +236,7 @@ def _run_micropython_suite(binary: str, tmp_path: Path) -> dict:
         ) from e
 
     report["_returncode"] = result.returncode
-    report["_staged_compat"] = str(stage / "_compat.py")
+    report["_stage"] = str(stage)
     return report
 
 
@@ -269,31 +283,62 @@ def test_micropython_suite_passes_with_coverage(tmp_path: Path) -> None:
     assert passed, "MicroPython runner reported no tests — discovery may be broken"
 
     # ── Coverage assertion ──────────────────────────────────────
-    # Runner reports covered lines keyed by the path it traced —
-    # which is the staged copy under ``tmp_path``. Compare against
-    # the executable line set computed from the source file.
-    staged_path = report["_staged_compat"]
-    covered = set(report["covered"].get(staged_path, []))
-    executable = _executable_lines_for("micropython", _COMPAT_SRC)
+    # Sum coverage across every staged source file in
+    # ``exoclaw/`` — same scope CPython's coverage.py measures.
+    # The runner reports per-file covered lines keyed by absolute
+    # path under ``tmp_path/stage/exoclaw/...``; map each back to
+    # the original source under ``exoclaw/`` to compute the
+    # executable line set with ``coverage.PythonParser``.
+    stage_root = Path(report["_stage"]) / "exoclaw"
+    covered_by_file = report["covered"]
 
-    if not executable:
+    total_executable: int = 0
+    total_hit: int = 0
+    per_file: dict[str, tuple[int, int, set[int]]] = {}
+    for staged_abs, hit_lines in covered_by_file.items():
+        try:
+            rel = Path(staged_abs).relative_to(stage_root)
+        except ValueError:
+            # Tracer caught a path outside the staged exoclaw — skip
+            # (test-driver code, stub modules, etc.).
+            continue
+        original = _EXOCLAW_PKG / rel
+        if not original.exists():
+            continue
+        executable = _executable_lines_for("micropython", original)
+        if not executable:
+            continue
+        hit = set(hit_lines) & executable
+        miss = executable - set(hit_lines)
+        total_executable += len(executable)
+        total_hit += len(hit)
+        per_file[str(rel)] = (len(hit), len(executable), miss)
+
+    if total_executable == 0:
         pytest.fail(
-            "Could not determine MicroPython-executable line set for "
-            "{}. Source-level analysis broke.".format(_COMPAT_SRC)
+            "MicroPython coverage report had zero traceable lines. "
+            "Stage root={!r}; covered keys={!r}".format(
+                str(stage_root), list(covered_by_file)[:5]
+            )
         )
 
-    hit = covered & executable
-    miss = executable - covered
-    coverage = len(hit) / len(executable)
-
-    assert coverage >= _COVERAGE_THRESHOLD, (
-        "MicroPython coverage of exoclaw/_compat.py is "
-        "{:.1%} ({}/{}); threshold is {:.0%}. "
-        "Uncovered lines: {}".format(
-            coverage,
-            len(hit),
-            len(executable),
-            _COVERAGE_THRESHOLD,
-            sorted(miss)[:20],
+    coverage = total_hit / total_executable
+    if coverage < _COVERAGE_THRESHOLD:
+        # Surface the worst-covered files so failures are
+        # actionable — sorted by miss count descending, top 5.
+        worst = sorted(
+            ((rel, hit, total, miss) for rel, (hit, total, miss) in per_file.items()),
+            key=lambda x: -len(x[3]),
+        )[:5]
+        details = "\n  ".join(
+            "{}: {}/{} ({:.0%}) — missing {}".format(
+                rel, hit, total, hit / total if total else 0.0, sorted(miss)[:10]
+            )
+            for rel, hit, total, miss in worst
         )
-    )
+        pytest.fail(
+            "MicroPython coverage across exoclaw/ is {:.1%} "
+            "({}/{}); threshold is {:.0%}.\n  Worst files:\n  {}".format(
+                coverage, total_hit, total_executable, _COVERAGE_THRESHOLD, details
+            )
+        )

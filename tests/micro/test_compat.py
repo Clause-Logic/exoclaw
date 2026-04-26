@@ -14,10 +14,9 @@ asserts coverage ≥ 95% of MicroPython-reachable lines.
 
 import os
 
-# The runner sets up sys.path so ``_compat`` resolves to
-# ``exoclaw/_compat.py`` (a flat copy or sym-link, since
-# ``exoclaw/__init__.py`` still uses CPython-only imports).
-import _compat as c
+# The runner stages the full ``exoclaw/`` package under ``tmp_path``,
+# so ``import exoclaw._compat`` works the same way it does on CPython.
+from exoclaw import _compat as c
 
 
 def test_branch_selection_micropython():

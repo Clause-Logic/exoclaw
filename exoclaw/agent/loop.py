@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 from typing import Any, Awaitable, Callable, cast
 
 from exoclaw._compat import (
     bind_log_contextvars,
     get_log_contextvars,
     get_logger,
+    monotonic_diff_ms,
+    monotonic_ms,
     unbind_log_contextvars,
 )
 from exoclaw.agent.conversation import Conversation
@@ -362,7 +363,7 @@ class AgentLoop:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                            "arguments": json.dumps(tc.arguments),
                         },
                     }
                     for tc in response.tool_calls
@@ -379,7 +380,10 @@ class AgentLoop:
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    # ``ensure_ascii`` kwarg dropped: MicroPython 1.27's
+                    # ``json.dumps`` doesn't accept it. The non-ASCII
+                    # cost is just longer ``\uXXXX``-escaped output.
+                    args_str = json.dumps(tool_call.arguments)
                     # `tool_call` + `tool_result` form a start/stop pair
                     # correlated by `tool.call_id`. On error, `.exception()`
                     # attaches the traceback via structlog's format_exc_info.
@@ -391,7 +395,7 @@ class AgentLoop:
                         },
                         args=args_str[:200],
                     )
-                    t0 = time.monotonic()
+                    t0 = monotonic_ms()
                     status = "ok"
                     exc: BaseException | None = None
                     result = ""
@@ -439,7 +443,7 @@ class AgentLoop:
                             "\n\n[Analyze the error above and try a different approach.]"
                         )
                     finally:
-                        duration_ms = int((time.monotonic() - t0) * 1000)
+                        duration_ms = monotonic_diff_ms(monotonic_ms(), t0)
                         stop_kwargs: dict[str, object] = {
                             "tool.name": tool_call.name,
                             "tool.call_id": tool_call.id,
@@ -620,7 +624,7 @@ class AgentLoop:
                 "turn.chain": chain,
             }
         )
-        turn_start = time.monotonic()
+        turn_start = monotonic_ms()
         self._log.info("turn_start")
         try:
             initial = await self._executor.build_prompt(
@@ -660,7 +664,7 @@ class AgentLoop:
         finally:
             self._log.info(
                 "turn_end",
-                **{"turn.duration_ms": int((time.monotonic() - turn_start) * 1000)},
+                **{"turn.duration_ms": monotonic_diff_ms(monotonic_ms(), turn_start)},
             )
             to_rebind = {k: v for k, v in prior_turn_ctx.items() if v is not _sentinel}
             to_unbind = tuple(k for k, v in prior_turn_ctx.items() if v is _sentinel)

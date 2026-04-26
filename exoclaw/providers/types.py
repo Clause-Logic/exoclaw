@@ -1,8 +1,14 @@
-"""Shared data types for LLM provider responses."""
+"""Shared data types for LLM provider responses.
+
+``ToolCallRequest`` and ``LLMResponse`` are plain classes with
+explicit ``__init__`` rather than ``@dataclass`` — MicroPython 1.27
+strips ``name: type`` annotations at compile time, so a runtime
+dataclass decorator can't introspect them. Manually-written
+``__init__`` is the cross-runtime path.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, Required, TypedDict, Union
 
 
@@ -10,25 +16,33 @@ class ContextWindowExceededError(Exception):
     """Raised by providers when the prompt exceeds the model's context window."""
 
 
-@dataclass
 class ToolCallRequest:
     """A tool call request from the LLM."""
 
-    id: str
-    name: str
-    arguments: dict[str, object]
+    def __init__(self, id: str, name: str, arguments: dict[str, object]) -> None:
+        self.id = id
+        self.name = name
+        self.arguments = arguments
 
 
-@dataclass
 class LLMResponse:
     """Response from an LLM provider."""
 
-    content: str | None
-    tool_calls: list[ToolCallRequest] = field(default_factory=list)
-    finish_reason: str = "stop"
-    usage: dict[str, int] = field(default_factory=dict)
-    reasoning_content: str | None = None
-    thinking_blocks: list[dict[str, object]] | None = None
+    def __init__(
+        self,
+        content: str | None,
+        tool_calls: list[ToolCallRequest] | None = None,
+        finish_reason: str = "stop",
+        usage: dict[str, int] | None = None,
+        reasoning_content: str | None = None,
+        thinking_blocks: list[dict[str, object]] | None = None,
+    ) -> None:
+        self.content = content
+        self.tool_calls = tool_calls if tool_calls is not None else []
+        self.finish_reason = finish_reason
+        self.usage = usage if usage is not None else {}
+        self.reasoning_content = reasoning_content
+        self.thinking_blocks = thinking_blocks
 
     @property
     def has_tool_calls(self) -> bool:

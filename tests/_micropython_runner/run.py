@@ -47,7 +47,10 @@ import sys
 
 
 def _parse_args(argv):
-    args = {"tests_dir": "tests/micro", "cov_paths": []}
+    """``--cov FILE`` adds a single source file to trace (repeatable);
+    ``--cov-dir DIR`` adds every ``.py`` under ``DIR`` recursively.
+    Both options can be combined and repeated."""
+    args = {"tests_dir": "tests/micro", "cov_paths": [], "cov_dirs": []}
     i = 1
     while i < len(argv):
         arg = argv[i]
@@ -57,6 +60,9 @@ def _parse_args(argv):
         elif arg == "--cov" and i + 1 < len(argv):
             args["cov_paths"].append(argv[i + 1])
             i += 2
+        elif arg == "--cov-dir" and i + 1 < len(argv):
+            args["cov_dirs"].append(argv[i + 1])
+            i += 2
         elif arg == "--help" or arg == "-h":
             print(__doc__ or "")
             sys.exit(0)
@@ -64,6 +70,35 @@ def _parse_args(argv):
             print("unrecognised arg:", arg)
             sys.exit(2)
     return args
+
+
+def _walk_py(root):
+    """Recursive ``.py`` walk. MicroPython's ``os`` doesn't ship
+    ``os.walk``; reimplement with ``os.listdir`` + ``os.stat`` so we
+    can resolve every source file under ``exoclaw/`` for tracing.
+
+    ``__pycache__`` and dot-prefixed directories are skipped — they're
+    never user source."""
+    out = []
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return out
+    for name in entries:
+        if name.startswith(".") or name == "__pycache__":
+            continue
+        full = root + "/" + name
+        try:
+            mode = os.stat(full)[0]
+        except OSError:
+            continue
+        # ``stat[0]`` mode_t — bit 0o040000 indicates directory on
+        # both CPython and MicroPython unix port. Standard POSIX bits.
+        if mode & 0o040000:
+            out.extend(_walk_py(full))
+        elif name.endswith(".py"):
+            out.append(full)
+    return out
 
 
 # ── Coverage tracer ──────────────────────────────────────────────────────────
@@ -163,6 +198,10 @@ def main():
     for raw in args["cov_paths"]:
         abs_path = raw if raw.startswith("/") else os.getcwd() + "/" + raw
         cov_paths.add(abs_path)
+    for raw in args["cov_dirs"]:
+        abs_dir = raw if raw.startswith("/") else os.getcwd() + "/" + raw
+        for f in _walk_py(abs_dir):
+            cov_paths.add(f)
 
     test_files = _list_test_files(args["tests_dir"])
     if not test_files:

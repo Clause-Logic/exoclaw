@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, TypeGuard, runtime_checkable
 
 from exoclaw._compat import (
@@ -19,6 +18,7 @@ from exoclaw._compat import (
     make_lock,
     make_scratch_path,
     open_text_writer,
+    path_basename,
     random_bytes,
 )
 from exoclaw.agent.conversation import AppendableConversation, Conversation
@@ -28,7 +28,6 @@ from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import LLMResponse
 
 
-@dataclass
 class ToolResult:
     """Result of a tool invocation, possibly file-backed.
 
@@ -46,10 +45,15 @@ class ToolResult:
     legacy inline path. ``content`` is always populated (with a
     preview when ``content_file`` is set) so callers that don't look
     at ``content_file`` still see something diagnostic.
+
+    Plain class (not ``@dataclass``) so it loads on MicroPython,
+    which strips ``name: type`` annotations at compile time — a
+    runtime dataclass decorator can't introspect them there.
     """
 
-    content: str
-    content_file: str | None = None
+    def __init__(self, content: str, content_file: str | None = None) -> None:
+        self.content = content
+        self.content_file = content_file
 
 
 if TYPE_CHECKING:
@@ -711,7 +715,7 @@ class DirectExecutor:
         # dropped from the preview rather than crashing the encode.
         preview = b"".join(preview_chunks).decode("utf-8", errors="ignore")
         if bytes_written > len(preview.encode("utf-8")):
-            preview = f"{preview}…\n[streamed {bytes_written} bytes to {os.path.basename(path)}]"
+            preview = f"{preview}…\n[streamed {bytes_written} bytes to {path_basename(path)}]"
         return ToolResult(content=preview, content_file=path)
 
     async def build_prompt(

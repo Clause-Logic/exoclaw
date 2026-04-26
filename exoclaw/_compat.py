@@ -348,6 +348,65 @@ def get_logger(name: str = "") -> Any:
         return _StubLogger(name)
 
 
+# ── Monotonic clock + path helpers (stdlib gaps on MicroPython) ──────────────
+
+
+def monotonic_ms() -> int:
+    """Return a monotonic timestamp in integer milliseconds.
+
+    CPython has ``time.monotonic()`` returning float seconds; MP's
+    ``time`` module exposes ``ticks_ms()`` instead (already int ms,
+    monotonic but wraps at platform-specific limit). exoclaw only
+    uses this for turn-duration measurement, so the wrap-around isn't
+    a real concern — turns are seconds-long, the wrap window is
+    minutes (ESP32) to hours (CPython int math).
+    """
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        import time as _time
+
+        return _time.ticks_ms()
+    import time as _time  # pragma: no cover (micropython)
+
+    return int(_time.monotonic() * 1000)  # pragma: no cover (micropython)
+
+
+def monotonic_diff_ms(later: int, earlier: int) -> int:
+    """Subtract two ``monotonic_ms()`` values safely.
+
+    On MP, ``ticks_diff`` handles the wrap-around correctly when
+    subtracting raw ``ticks_ms`` values. On CPython, the values are
+    monotonically-increasing ints so plain subtraction works."""
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        import time as _time
+
+        return _time.ticks_diff(later, earlier)
+    return later - earlier  # pragma: no cover (micropython)
+
+
+def path_exists(path: str) -> bool:
+    """Return True if ``path`` exists. ``os.path`` isn't a module on
+    MicroPython (only ``os`` itself ships); ``os.stat`` raises if the
+    path is missing, so we catch the ``OSError`` and translate."""
+    try:
+        os.stat(path)
+        return True
+    except OSError:
+        return False
+
+
+def path_basename(path: str) -> str:
+    """Return the trailing component of ``path``. Mirrors
+    ``os.path.basename`` for the simple case exoclaw needs (no
+    Windows separators — exoclaw never builds Windows paths through
+    this helper). MP doesn't ship ``os.path``."""
+    # Find the last separator and slice. Returns the full string when
+    # no separator is present (mirrors stdlib behaviour).
+    idx = path.rfind("/")
+    if idx == -1:
+        return path
+    return path[idx + 1 :]
+
+
 # ── Async queue (uasyncio fallback for ``asyncio.Queue``) ────────────────────
 
 
@@ -479,7 +538,11 @@ __all__ = [
     "make_async_queue",
     "make_lock",
     "make_scratch_path",
+    "monotonic_diff_ms",
+    "monotonic_ms",
     "open_text_writer",
+    "path_basename",
+    "path_exists",
     "random_bytes",
     "unbind_log_contextvars",
 ]

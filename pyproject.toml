@@ -76,10 +76,35 @@ ignore = ["E501"]
 # covers ``Protocol`` / ``TypeGuard`` which keep their PascalCase
 # to mirror the real typing module's public names.
 "tests/_micropython_stubs/*" = ["ANN", "N802"]
+# The MicroPython runner and the test files it executes run on
+# MicroPython 1.27 — ``typing`` is a stub there and full ANN
+# annotations would just import-fail. Keep them pure-Python.
+"tests/_micropython_runner/*" = ["ANN"]
+"tests/micro/*" = ["ANN"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# ``tests/micro/`` and ``tests/_micropython_runner/`` only run on
+# MicroPython (driven by ``tests/test_micropython_runner.py`` via
+# subprocess). The stubs are vendored ``__future__`` / ``typing``
+# replacements that would conflict if imported on CPython.
+addopts = "--ignore=tests/micro --ignore=tests/_micropython_runner --ignore=tests/_micropython_stubs"
+
+[tool.coverage.run]
+omit = ["tests/micro/*", "tests/_micropython_runner/*"]
+
+[tool.coverage.report]
+# Per-runtime exclusion. The negative-lookahead matches
+# ``pragma: no cover`` only when NOT followed by ``(micropython)``
+# — bare and ``(cpython)``-tagged exclude here, ``(micropython)``
+# stays in scope (CPython CAN reach those lines).
+#
+# Mirror policy in
+# ``tests/test_micropython_runner.py::_executable_lines_for``.
+exclude_lines = [
+    "pragma:\\s*no\\s*cover(?!\\s*\\(micropython\\))",
+]
 
 [dependency-groups]
 dev = [

@@ -14,6 +14,8 @@ pip install exoclaw
 
 One runtime dependency: `structlog`.
 
+> **Want a running bot in 30 seconds?** Skip ahead to [`exoclaw-nanobot`](https://github.com/Clause-Logic/exoclaw-plugins/tree/main/packages/exoclaw-nanobot) — the one-line bundle that wires every plugin together and gives you a working agent. The full plugin index lives at [`exoclaw-plugins`](https://github.com/Clause-Logic/exoclaw-plugins) (provider, conversation, tools, channels, executors). This repo is the protocol-only core that all of those build on; read on if you want to know what's underneath.
+
 ---
 
 ## Origin
@@ -571,6 +573,29 @@ exoclaw/
     protocol.py            # LLMProvider protocol
     types.py               # LLMResponse, ToolCallRequest
 ```
+
+---
+
+## MicroPython support
+
+exoclaw core runs on **CPython and MicroPython** out of the same source tree. The compat shim in `exoclaw/_compat.py` papers over runtime differences (`ContextVar`, `inspect.iscoroutinefunction`, `secrets.token_bytes`, `tempfile.mkstemp`, `threading.Lock`, `structlog`); call sites import the shim and don't branch on the runtime.
+
+**It's safe to use because CI proves it.** Every PR runs the test suite as a matrix on both runtimes:
+
+- **CPython entry**: `pytest --cov=exoclaw` with a coverage threshold. Lines tagged `# pragma: no cover (cpython)` (the MicroPython-only branches in the shim) are excluded — they aren't reachable here.
+- **MicroPython entry**: a tiny pytest-shim runner (`tests/_micropython_runner/run.py`) executes pure-Python tests under MicroPython's unix port (built with `MICROPY_PY_SYS_SETTRACE=1`), traces line execution via `sys.settrace`, and asserts ≥95% coverage on the lines reachable from MicroPython. Lines tagged `# pragma: no cover (micropython)` (CPython-only branches) are excluded — they aren't reachable there.
+
+Both runtimes independently must hit their coverage threshold on their own reachable line set. A change that breaks MicroPython compat fails the matrix even if it leaves CPython green. Result: you can take a `git pull` of `main` and run it on an ESP32-S3 (with `MICROPY_PY_SYS_SETTRACE`) or a Pi Zero with the same confidence as on a server. **No silent breakage.**
+
+The aspirational target is detailed in `docs/memory-model.md` — the same memory architecture work that bounded multi-tenant openclaw's RAM (Steps A-D) is what makes single-tenant MicroPython runtime possible. Per-active-turn working set is now ~100 KiB; per-session baseline ~5 KiB; aggregate fits comfortably under an 8 MiB cgroup or a 512 MiB single-board Linux.
+
+**What you don't need to think about:**
+
+- **Branching in your code.** Import from `exoclaw.executor` / `exoclaw.agent.loop` / etc. as normal; the shim handles the runtime split internally.
+- **Stub modules.** `__future__` and `typing` ship with MicroPython via `mip install`; vendored stubs live in `tests/_micropython_stubs/` so CI doesn't need a network round-trip.
+- **Build setup.** Locally, `brew install micropython` covers the basics; for coverage measurement, build the unix port's `coverage` variant from source (instructions in `tests/test_micropython_runner.py`'s docstring). CI does this once per PR.
+
+Plugins haven't been ported. The MicroPython story today is: **core itself runs cleanly; deploy your own LLM provider + lightweight tool set**. The reference micro-friendly provider is on the roadmap (`exoclaw-provider-micro-openai` — a ~300-line `urequests`/`ussl` client), and the [`exoclaw-plugins`](https://github.com/Clause-Logic/exoclaw-plugins) repo's port to MicroPython is tracked separately.
 
 ---
 

@@ -37,11 +37,19 @@ IS_MICROPYTHON: bool = sys.implementation.name == "micropython"
 
 # ── Random bytes ─────────────────────────────────────────────────────────────
 
-if IS_MICROPYTHON:
+if IS_MICROPYTHON:  # pragma: no cover (cpython)
     # MicroPython has ``os.urandom`` but no ``secrets`` module. The
     # quality is the same — both delegate to the platform's CSPRNG.
+    #
+    # Per-runtime pragma protocol throughout this file:
+    #   ``# pragma: no cover (cpython)``  — body unreachable on
+    #     CPython, excluded from coverage.py.
+    #   ``# pragma: no cover (micropython)``  — body unreachable
+    #     on MicroPython, excluded from the runner's report.
+    # See ``[tool.coverage.report]`` in ``pyproject.toml`` and
+    # ``tests/test_micropython_runner.py::_executable_lines_for``.
     random_bytes = os.urandom
-else:
+else:  # pragma: no cover (micropython)
     from secrets import token_bytes as random_bytes
 
 
@@ -81,7 +89,7 @@ def make_lock() -> Any:
     single-task model means a no-op is correct: there's no
     pre-emption point inside the critical sections.
     """
-    if IS_MICROPYTHON:
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
         return _NoopLock()
     from threading import Lock
 
@@ -90,7 +98,7 @@ def make_lock() -> Any:
 
 # ── Task-local state (mirrors ``ContextVar`` API) ────────────────────────────
 
-if IS_MICROPYTHON:
+if IS_MICROPYTHON:  # pragma: no cover (cpython)
     _UNSET: Any = object()
 
     class _Token:
@@ -144,7 +152,7 @@ if IS_MICROPYTHON:
         def reset(self, token: _Token) -> None:
             self._value = token.old_value
 
-else:
+else:  # pragma: no cover (micropython)
     # Re-export the real ContextVar so callers can use the shim
     # name. ``ContextVar`` is parameterised (``ContextVar[T]``);
     # the alias preserves that for static type checking.
@@ -153,7 +161,7 @@ else:
 
 # ── Inspect helpers ──────────────────────────────────────────────────────────
 
-if IS_MICROPYTHON:
+if IS_MICROPYTHON:  # pragma: no cover (cpython)
 
     def iscoroutinefunction(fn: Any) -> bool:
         """Conservative MicroPython fallback.
@@ -172,7 +180,7 @@ if IS_MICROPYTHON:
         """See ``iscoroutinefunction``. Same conservative fallback."""
         return False
 
-else:
+else:  # pragma: no cover (micropython)
     from inspect import isasyncgenfunction, iscoroutinefunction
 
 
@@ -197,9 +205,9 @@ def make_scratch_path(prefix: str = "tmp-", suffix: str = "", dir: str | None = 
     for collision avoidance under the kind of fan-out exoclaw runs.
     """
     if dir is None:
-        if IS_MICROPYTHON:
+        if IS_MICROPYTHON:  # pragma: no cover (cpython)
             base = "/tmp"
-        else:
+        else:  # pragma: no cover (micropython)
             from tempfile import gettempdir
 
             base = gettempdir()
@@ -284,13 +292,13 @@ def get_logger(name: str = "") -> Any:
     without ``structlog``, returns a ``_StubLogger`` that prints
     structured JSON to stdout.
     """
-    if IS_MICROPYTHON:
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
         return _StubLogger(name)
-    try:
+    try:  # pragma: no cover (micropython)
         import structlog
 
         return structlog.get_logger(name)
-    except ImportError:
+    except ImportError:  # pragma: no cover
         return _StubLogger(name)
 
 

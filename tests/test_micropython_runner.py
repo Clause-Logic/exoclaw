@@ -121,7 +121,11 @@ def _executable_lines_for(runtime: str, source_path: Path) -> set[int]:
         tagged = r"pragma:\s*no\s*cover\s*\(cpython\)"
     else:
         raise ValueError(f"unknown runtime: {runtime!r}")
-    exclude = f"({bare}|{tagged})"
+    # Protocol body ``...`` mirrors ``[tool.coverage.report]`` in
+    # ``pyproject.toml`` — bare ellipsis on its own line is the
+    # standard idiom for unreachable abstract method bodies.
+    ellipsis = r"^\s*\.\.\.\s*$"
+    exclude = f"({bare}|{tagged}|{ellipsis})"
 
     parser = PythonParser(filename=str(source_path), exclude=exclude)
     parser.parse_source()

@@ -104,6 +104,11 @@ omit = ["tests/micro/*", "tests/_micropython_runner/*"]
 # ``tests/test_micropython_runner.py::_executable_lines_for``.
 exclude_lines = [
     "pragma:\\s*no\\s*cover(?!\\s*\\(micropython\\))",
+    # Protocol method bodies — bare ``...`` on its own line is the
+    # standard idiom for unreachable abstract bodies (Protocol /
+    # @abstractmethod). The MicroPython runner mirrors this exclusion
+    # in ``tests/test_micropython_runner.py::_executable_lines_for``.
+    "^\\s*\\.\\.\\.\\s*$",
 ]
 
 [dependency-groups]

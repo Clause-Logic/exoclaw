@@ -811,8 +811,15 @@ if IS_MICROPYTHON:  # pragma: no cover (cpython)
 
         def relative_to(self, other: "Path | str") -> "Path":
             other_s = str(other).rstrip("/")
-            if not self._path.startswith(other_s):
-                raise ValueError(f"{self._path!r} not under {other_s!r}")
+            # Segment-boundary check — match either the exact path
+            # or a prefix followed by ``/``. Bare ``startswith``
+            # would accept ``/tmp/x``.relative_to(``/tmp/xy``) which
+            # ``pathlib.Path`` rejects.
+            ok = self._path == other_s or self._path.startswith(other_s + "/")
+            if not ok:
+                raise ValueError(
+                    "{!r} not under {!r}".format(self._path, other_s)
+                )
             rest = self._path[len(other_s) :].lstrip("/")
             return Path(rest)
 
@@ -952,10 +959,12 @@ _IMAGE_MIME_BY_EXT: dict[str, str] = {
 def guess_image_mime(path: str) -> str | None:
     """Extension-based MIME guess for the image-attachment path.
 
-    CPython delegates to ``mimetypes.guess_type``; MicroPython gets
-    a hand-rolled lookup table because ``mimetypes`` isn't part of
-    MP core. Same set of formats: ``png``, ``jpeg``, ``gif``, ``webp``,
-    ``bmp``."""
+    Returns ``image/*`` for known image extensions, ``None`` for
+    everything else. CPython delegates to ``mimetypes.guess_type``
+    and filters to image-only so callers get the same answer as
+    on MicroPython (where the lookup table is image-only by
+    construction). Supported formats: ``png``, ``jpeg``, ``gif``,
+    ``webp``, ``bmp``."""
     if IS_MICROPYTHON:  # pragma: no cover (cpython)
         path_lower = path.lower()
         for ext, mime in _IMAGE_MIME_BY_EXT.items():
@@ -965,6 +974,8 @@ def guess_image_mime(path: str) -> str | None:
     import mimetypes  # pragma: no cover (micropython)
 
     mime, _ = mimetypes.guess_type(path)  # pragma: no cover (micropython)
+    if mime is None or not mime.startswith("image/"):  # pragma: no cover (micropython)
+        return None
     return mime  # pragma: no cover (micropython)
 
 

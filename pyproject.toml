@@ -118,7 +118,18 @@ testpaths = ["tests"]
 addopts = "--ignore=tests/micro --ignore=tests/_micropython_runner --ignore=tests/_micropython_stubs"
 
 [tool.coverage.run]
-omit = ["tests/micro/*", "tests/_micropython_runner/*"]
+omit = [
+    "tests/micro/*",
+    "tests/_micropython_runner/*",
+    # MP-runtime fillers core ships for plugin firmware authors —
+    # never imported on CPython (real ``typing`` / ``dataclasses``
+    # win on stdlib resolution order). The MP gate covers them.
+    "exoclaw/_mp_lib/*",
+    # MP-only HTTP backend — selected by ``HTTPClient`` only when
+    # ``IS_MICROPYTHON``. CPython runs ``http/_cpython.py``; the
+    # MP gate covers ``_mp.py`` end-to-end with in-memory fakes.
+    "exoclaw/http/_mp.py",
+]
 
 [tool.coverage.report]
 # Per-runtime exclusion. The negative-lookahead matches

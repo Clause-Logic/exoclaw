@@ -25,6 +25,32 @@ sources = ["exoclaw/**/*.py", "tests/**/*.py", "pyproject.toml"]
 outputs = [".coverage"]
 run = "uv run pytest --cov=exoclaw --cov-fail-under=95 tests/"
 
+[tasks.cov-missing]
+description = "Run tests and print every uncovered line with its source"
+# Used to chase down which specific lines are missing when ``test``
+# fails the 95% threshold. ``coverage json`` dumps a structured
+# report; the inline post-processor opens each file and prints
+# ``path:N  <source line>`` so the gap is immediately readable
+# without a follow-up ``sed`` loop.
+run = """
+set -e
+uv run pytest --cov=exoclaw --cov-report=json --cov-fail-under=0 tests/ > /dev/null
+uv run python -c '
+import json, pathlib
+report = json.loads(pathlib.Path("coverage.json").read_text())
+files = report.get("files", {})
+for path, info in sorted(files.items()):
+    missing = info.get("missing_lines") or []
+    if not missing:
+        continue
+    src = pathlib.Path(path).read_text().splitlines()
+    print(f"\\n{path}: {info[\"summary\"][\"covered_lines\"]}/{info[\"summary\"][\"num_statements\"]} ({info[\"summary\"][\"percent_covered_display\"]}%)")
+    for ln in missing:
+        line = src[ln - 1] if 0 < ln <= len(src) else ""
+        print(f"  {ln:>4}  {line}")
+'
+"""
+
 # ── MicroPython tasks ───────────────────────────────────────────────
 #
 # Local MP work needs a staged copy of ``exoclaw/`` next to the

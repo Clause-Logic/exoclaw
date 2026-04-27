@@ -8,11 +8,12 @@ buffer), chunked-transfer response parsing, line-oriented SSE
 iteration. Same source either way; the runtime gate selects which
 submodule is loaded.
 
-Plugin authors that need HTTP should import ``HTTPClient`` /
-``StreamingResponse`` from here instead of taking a hard ``httpx``
-dependency. ``httpx`` doesn't run on MicroPython (C-extension
-dependencies, threading model, sniffio); a plugin that imports it
-directly excludes itself from the chip target.
+Plugin authors that need HTTP should import ``HTTPClient`` from
+here (and annotate against ``ClientProto`` / ``ResponseProto`` /
+``StreamCMProto`` if they need static types) instead of taking a
+hard ``httpx`` dependency. ``httpx`` doesn't run on MicroPython
+(C-extension dependencies, threading model, sniffio); a plugin
+that imports it directly excludes itself from the chip target.
 
 Surface:
 
@@ -232,6 +233,12 @@ __all__ = [
     "HTTPWriteTimeout",
     "ResponseProto",
     "StreamCMProto",
-    "from_httpx",
     "post_json",
 ]
+# ``from_httpx`` is CPython-only — the helper lives in
+# ``_cpython.py`` and exists to wrap a pre-built
+# ``httpx.AsyncClient`` for tests. On MicroPython the symbol
+# isn't defined, so listing it unconditionally in ``__all__``
+# would break ``from exoclaw.http import *``.
+if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+    __all__.append("from_httpx")

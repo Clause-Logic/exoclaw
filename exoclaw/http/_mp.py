@@ -67,7 +67,13 @@ def _parse_response_head(head: bytes) -> tuple[int, dict[str, str], bytes]:
     status_parts = lines[0].split(b" ", 2)
     if len(status_parts) < 2:
         raise HTTPError("malformed status line: {!r}".format(lines[0]))
-    status_code = int(status_parts[1])
+    # ``int()`` raises ``ValueError`` on a non-numeric status code
+    # (``HTTP/1.1 ABC OK``). Translate to ``HTTPError`` so callers
+    # only need to handle the public taxonomy.
+    try:
+        status_code = int(status_parts[1])
+    except ValueError:
+        raise HTTPError("malformed status line: {!r}".format(lines[0]))
     headers: dict[str, str] = {}
     for line in lines[1:]:
         if not line:

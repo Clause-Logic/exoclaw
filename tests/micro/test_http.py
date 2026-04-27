@@ -179,9 +179,7 @@ def test_chunked_body_round_trip_via_aread():
     body = _build_chunked_body([b"hello, ", b"world"])
     reader = _FakeReader([body])
     writer = _FakeWriter()
-    resp = h_mp.MPResponse(
-        200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b""
-    )
+    resp = h_mp.MPResponse(200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b"")
 
     async def _go():
         return await resp.aread()
@@ -196,9 +194,7 @@ def test_chunked_body_lines_iterates_decoded_lines():
     body = _build_chunked_body([sse[:10], sse[10:]])
     reader = _FakeReader([body])
     writer = _FakeWriter()
-    resp = h_mp.MPResponse(
-        200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b""
-    )
+    resp = h_mp.MPResponse(200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b"")
 
     async def _go():
         out = []
@@ -255,9 +251,7 @@ def test_aread_caches_body_between_calls():
     body = b"hello"
     reader = _FakeReader([body])
     writer = _FakeWriter()
-    resp = h_mp.MPResponse(
-        200, {"content-length": "5"}, reader, writer, initial_body=b""
-    )
+    resp = h_mp.MPResponse(200, {"content-length": "5"}, reader, writer, initial_body=b"")
 
     async def _go():
         first = await resp.aread()
@@ -547,9 +541,7 @@ def test_chunked_body_closed_mid_frame_raises():
     body = b"5\r"
     reader = _FakeReader([body])
     writer = _FakeWriter()
-    resp = h_mp.MPResponse(
-        200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b""
-    )
+    resp = h_mp.MPResponse(200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b"")
     raised = False
 
     async def _go():
@@ -569,9 +561,7 @@ def test_chunked_body_closed_mid_chunk_raises():
     body = b"5\r\nhel"
     reader = _FakeReader([body])
     writer = _FakeWriter()
-    resp = h_mp.MPResponse(
-        200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b""
-    )
+    resp = h_mp.MPResponse(200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b"")
     raised = False
 
     async def _go():
@@ -590,9 +580,7 @@ def test_chunked_body_bad_size_raises():
     body = b"NOT-HEX\r\nhello\r\n0\r\n\r\n"
     reader = _FakeReader([body])
     writer = _FakeWriter()
-    resp = h_mp.MPResponse(
-        200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b""
-    )
+    resp = h_mp.MPResponse(200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b"")
     raised = False
 
     async def _go():
@@ -611,9 +599,7 @@ def test_chunked_body_size_with_extension():
     body = b"5;ext=val\r\nhello\r\n0\r\n\r\n"
     reader = _FakeReader([body])
     writer = _FakeWriter()
-    resp = h_mp.MPResponse(
-        200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b""
-    )
+    resp = h_mp.MPResponse(200, {"transfer-encoding": "chunked"}, reader, writer, initial_body=b"")
 
     async def _go():
         return await resp.aread()
@@ -625,9 +611,7 @@ def test_until_close_body_yields_initial_then_socket():
     """No content-length, no chunked → read until EOF."""
     reader = _FakeReader([b"more-data"])
     writer = _FakeWriter()
-    resp = h_mp.MPResponse(
-        200, {}, reader, writer, initial_body=b"head-data-"
-    )
+    resp = h_mp.MPResponse(200, {}, reader, writer, initial_body=b"head-data-")
 
     async def _go():
         return await resp.aread()

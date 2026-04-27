@@ -28,10 +28,20 @@ from exoclaw.http._cpython import HttpxClient
 
 def test_parse_url_basics() -> None:
     """``_parse_url`` covers the URLs plugin authors actually write."""
-    assert _parse_url("https://api.openai.com/v1/chat") == ("https", "api.openai.com", 443, "/v1/chat")
+    assert _parse_url("https://api.openai.com/v1/chat") == (
+        "https",
+        "api.openai.com",
+        443,
+        "/v1/chat",
+    )
     assert _parse_url("http://localhost:8080/x") == ("http", "localhost", 8080, "/x")
     assert _parse_url("https://api.example.com") == ("https", "api.example.com", 443, "/")
-    assert _parse_url("https://api.example.com:9443/v1") == ("https", "api.example.com", 9443, "/v1")
+    assert _parse_url("https://api.example.com:9443/v1") == (
+        "https",
+        "api.example.com",
+        9443,
+        "/v1",
+    )
 
 
 def test_parse_url_unknown_scheme_raises() -> None:
@@ -225,5 +235,3 @@ async def test_post_json_raises_on_error_status() -> None:
         assert exc_info.value.status_code == 401
     finally:
         await raw.aclose()
-
-

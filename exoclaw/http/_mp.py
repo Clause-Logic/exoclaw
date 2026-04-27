@@ -356,17 +356,13 @@ class MPStreamCM:
         except asyncio.TimeoutError as e:
             raise HTTPConnectError("connect timeout to {}:{}".format(host, port)) from e
         except OSError as e:
-            raise HTTPConnectError(
-                "connect failed to {}:{}: {}".format(host, port, e)
-            ) from e
+            raise HTTPConnectError("connect failed to {}:{}: {}".format(host, port, e)) from e
         self._reader = reader
         self._writer = writer
 
         try:
             await self._send_request(writer, host, path)
-            head = await asyncio.wait_for(
-                _read_until_double_crlf(reader), timeout=self._timeout
-            )
+            head = await asyncio.wait_for(_read_until_double_crlf(reader), timeout=self._timeout)
         except asyncio.TimeoutError as e:
             await self._close_writer()
             raise HTTPReadTimeout("response head timeout") from e
@@ -400,9 +396,7 @@ class MPStreamCM:
             pass
         self._writer = None
 
-    async def _send_request(
-        self, writer: asyncio.StreamWriter, host: str, path: str
-    ) -> None:
+    async def _send_request(self, writer: asyncio.StreamWriter, host: str, path: str) -> None:
         """Build and send the HTTP/1.1 request.
 
         Always uses chunked transfer encoding for the body so the
@@ -462,9 +456,7 @@ class MPStreamCM:
         #     scheduler still drives any I/O it does.
         try:
             if hasattr(content, "__aiter__") or hasattr(content, "__anext__"):
-                content_iter = (
-                    content.__aiter__() if hasattr(content, "__aiter__") else content
-                )
+                content_iter = content.__aiter__() if hasattr(content, "__aiter__") else content
                 while True:
                     try:
                         chunk = await content_iter.__anext__()
@@ -527,6 +519,4 @@ class MPClient:
         content: "AsyncIterable[bytes] | bytes | None" = None,
         timeout: float | None = None,
     ) -> MPStreamCM:
-        return MPStreamCM(
-            url, headers, content, timeout or self._timeout, self._ssl_context
-        )
+        return MPStreamCM(url, headers, content, timeout or self._timeout, self._ssl_context)

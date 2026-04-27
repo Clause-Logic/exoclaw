@@ -88,19 +88,21 @@ def _executable_lines_for(runtime: str, source_path: Path) -> set[int]:
     Delegates to coverage.py's ``PythonParser`` for the canonical
     executable-line set (it knows about docstrings, multi-line
     tokens, decorators, etc. — all the things ``sys.settrace``
-    actually reports). Per-runtime exclusion is applied by passing
-    a regex that matches the OPPOSITE runtime's pragma:
+    actually reports). Per-runtime exclusion follows the pragma
+    semantics ``# pragma: no cover (X)`` = "this line is
+    unreachable on runtime X" — the regex for runtime X matches
+    its OWN-tagged pragma:
 
     - For ``runtime == "micropython"``: exclude lines tagged
-      ``# pragma: no cover (cpython)`` (CPython-only branches —
-      not reachable on micro). The bare ``# pragma: no cover``
-      is also excluded, matching CPython's default.
+      ``# pragma: no cover (micropython)`` (the CPython-only
+      branches that the MP bytecode never reaches). Bare
+      ``# pragma: no cover`` is also excluded.
     - For ``runtime == "cpython"``: exclude lines tagged
-      ``# pragma: no cover (micropython)``. Mirror policy.
+      ``# pragma: no cover (cpython)``. Mirror policy.
 
-    This means each runtime measures only the lines it can actually
-    reach. Source-level annotation determines the scope; runtime
-    tracers determine the hits.
+    This means each runtime measures only the lines it can
+    actually reach. Source-level annotation determines the scope;
+    runtime tracers determine the hits.
     """
     from coverage.python import PythonParser
 
@@ -169,7 +171,13 @@ def _executable_lines_for(runtime: str, source_path: Path) -> set[int]:
         if header_lineno > len(lines):
             continue
         header_line = lines[header_lineno - 1]
-        if not header_line.rstrip().endswith(":"):
+        # Strip trailing comments before checking for the suite-
+        # opening ``:``. Common case: ``if IS_MICROPYTHON:  # pragma:
+        # no cover (cpython)`` — without this strip the rstrip-only
+        # check sees the closing ``)`` of the pragma, fails, and the
+        # block body never gets expanded.
+        header_code = header_line.split("#", 1)[0].rstrip()
+        if not header_code.endswith(":"):
             continue
         header_indent = _indent(header_line)
         i = header_lineno + 1
@@ -191,11 +199,16 @@ def _executable_lines_for(runtime: str, source_path: Path) -> set[int]:
 
 
 def _run_micropython_suite(binary: str, tmp_path: Path) -> dict:
-    """Subprocess-run the MicroPython runner. Returns the parsed
-    JSON report. Raises on non-zero exit (the runner prints the
-    report regardless of test pass/fail, but exit 1 means at
-    least one test failed; we return the report anyway so the
-    caller can surface specific failures).
+    """Subprocess-run the MicroPython runner and return the parsed
+    JSON report.
+
+    The runner prints the report regardless of test pass/fail, so
+    this helper returns the parsed report even when the subprocess
+    exits non-zero — callers inspect ``report["_returncode"]`` to
+    surface specific failures with full context. Only raises if
+    the runner produces no output or its final stdout line isn't
+    valid JSON (i.e. the runner itself crashed before emitting
+    its report).
 
     Stages the full ``exoclaw/`` package + vendored typing /
     dataclasses / datetime stubs into ``tmp_path`` so the runner
@@ -287,15 +300,36 @@ def test_micropython_suite_passes_with_coverage(tmp_path: Path) -> None:
         )
 
     if not _has_settrace(binary):
-        pytest.skip(
+        message = (
             "MicroPython binary at {!r} does not support sys.settrace "
             "(required for coverage measurement). Build the unix port's "
             "``coverage`` variant — brew's bottle doesn't enable it. "
             "Set $EXOCLAW_MICROPYTHON_BIN to point at the coverage build. "
-            "See this file's docstring for instructions.".format(binary)
-        )
+            "See this file's docstring for instructions."
+        ).format(binary)
+        # If the user explicitly wired up a binary (CI / local
+        # ``mise.local.toml``), a missing-settrace bottle is a
+        # configuration bug, not "tests not applicable" — fail
+        # loudly so the gate doesn't silently pass on a non-coverage
+        # build. Reserve ``skip`` for the genuine no-binary-in-PATH
+        # case where the matrix entry isn't set up at all.
+        if os.environ.get("EXOCLAW_MICROPYTHON_BIN") or os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
 
     report = _run_micropython_suite(binary, tmp_path)
+
+    # The runner emits ``{"error": ...}`` when it can't even
+    # discover tests (e.g. no test files matched the pattern).
+    # Surface that explicitly — the failed-tests assertion below
+    # would silently pass on an empty failed list.
+    if report.get("error"):
+        pytest.fail("MicroPython runner reported error: {}".format(report["error"]))
+    if report["_returncode"] != 0 and not report.get("failed"):
+        pytest.fail(
+            "MicroPython runner exited {} with no tests in failed list. "
+            "Output may have been truncated. Report: {}".format(report["_returncode"], report)
+        )
 
     # ── Pass/fail assertion ─────────────────────────────────────
     failed = report.get("failed", [])

@@ -4,9 +4,9 @@ Runs under ``tests/_micropython_runner/run.py``. Pure-Python — no
 ``pytest`` / fixture machinery (MicroPython doesn't have it). Each
 ``test_*`` function is invoked with no args; failures raise.
 
-Mirrors the assertions in ``tests/test_micropython_compat.py::test_runs_on_cpython_too``
-but on the MicroPython runtime: same surface, opposite branches.
-Coverage of ``_compat.py`` is tracked by the runner via
+Mirrors the assertions in ``tests/test_compat.py`` (the CPython
+side) but on the MicroPython runtime: same surface, opposite
+branches. Coverage of ``_compat.py`` is tracked by the runner via
 ``sys.settrace``; the CPython-side wrapper
 (``tests/test_micropython_runner.py``) parses the report and
 asserts coverage ≥ 95% of MicroPython-reachable lines.

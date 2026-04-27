@@ -15,13 +15,16 @@ unreliable; this helper exists so any tool's test suite can call
 deterministic regression check.
 
 **MicroPython note:** every line below is excluded from the
-MicroPython coverage scope. The helper's premise — per-task
-ContextVar isolation — doesn't hold under uasyncio's cooperative
-single-task model (``_compat.TaskLocal`` on MP is module-level
-state). Plugin authors run their test suites on CPython, where
-``ContextVar`` actually scopes per task, so the helper does its job
-there. Marked as a whole because partial line-level pragmas would
-just clutter the file."""
+MicroPython coverage scope. ``_compat.TaskLocal`` on MP DOES
+provide real per-task isolation (keyed by
+``id(asyncio.current_task())``), so a tool using ``TaskLocal``
+under cooperative single-task uasyncio gets the correct
+ALPHA-sees-ALPHA / BRAVO-sees-BRAVO behaviour. The reason this
+helper still doesn't run on MP is the test rig's bookkeeping —
+exoclaw plugins run their assertion suites on CPython where
+``contextvars.ContextVar`` is the native primitive. Marked as a
+whole because partial line-level pragmas would just clutter the
+file."""
 
 from __future__ import annotations  # pragma: no cover (micropython)
 

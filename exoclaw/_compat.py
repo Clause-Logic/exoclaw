@@ -248,13 +248,15 @@ if IS_MICROPYTHON:  # pragma: no cover (cpython)
         to tell them apart without calling the function.
 
         Callers that need MP-side streaming-tool dispatch (the
-        memory-model.md Step D path that makes ESP32-S3 viable)
-        should NOT rely on this shim alone. ``executor.
-        execute_tool_with_handle`` does **result-based dispatch**:
-        call the streamer with validated params, then check whether
-        the result has ``__aiter__`` to know whether to drain to a
-        scratch file or treat the value as a regular coroutine
-        return."""
+        memory-model.md Step D path) shouldn't rely on this shim
+        alone — ``executor.execute_tool_with_handle`` does
+        per-runtime dispatch instead: ``async for`` on CPython
+        (after ``inspect.isasyncgenfunction`` clears it pre-call)
+        and plain ``for`` on MP (since MP collapses ``async def +
+        yield`` to a sync generator). This shim is just the
+        conservative pre-call probe — returning ``False`` keeps
+        callers off any path that would assume static introspection
+        worked."""
         return False
 
     def isawaitable(value: Any) -> bool:

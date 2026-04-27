@@ -13,25 +13,31 @@ build the coverage variant from source and pass its path.
 
 Usage (under MicroPython)::
 
-    micropython run.py --tests-dir tests/micro --cov exoclaw/_compat.py
+    micropython run.py --tests-dir tests/micro --cov-dir exoclaw
 
 Output (one JSON object on stdout when complete)::
 
-    {"passed": [...], "failed": [...], "covered": [int, ...]}
+    {
+        "passed": ["path::test_name", ...],
+        "failed": [{"file": ..., "test": ..., "error": ...}, ...],
+        "covered": {"abs/path/file.py": [line, line, ...], ...},
+    }
 
 Exits 0 on every test passing, 1 on any failure / error / import
 problem. The CPython side (``tests/test_micropython_runner.py``)
-parses the JSON, asserts every test passed, computes coverage % on
-the target file (counting only lines reachable from the
-MicroPython runtime — see ``_executable_lines``), and asserts
-``coverage >= 95%``.
+parses the JSON, asserts every test passed, and computes coverage
+% on the staged source files. Per-runtime executable-line
+filtering (the ``# pragma: no cover (micropython|cpython)``
+honour) lives there — see ``_executable_lines_for`` — not in this
+runner. This runner just records every line ``sys.settrace``
+fires on, scoped to the paths passed via ``--cov`` / ``--cov-dir``.
 
 Pragma protocol — runtime-specific exclusions:
 
 - ``# pragma: no cover (cpython)``  — excluded from CPython
   coverage.py reporting (configured in ``pyproject.toml``).
-- ``# pragma: no cover (micropython)``  — excluded from this
-  runner's report (filtered by ``_executable_lines``).
+- ``# pragma: no cover (micropython)``  — excluded from the
+  CPython-side wrapper's MP coverage computation.
 
 The ``_compat.py`` shim uses both — every ``if IS_MICROPYTHON:``
 branch's body is unreachable on CPython, every ``else:`` block is

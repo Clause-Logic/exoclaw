@@ -9,7 +9,7 @@ dataclass decorator can't introspect them. Manually-written
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Required, TypedDict, Union
+from typing import TYPE_CHECKING, NotRequired, Optional, Required, TypedDict, Union
 
 
 class ContextWindowExceededError(Exception):
@@ -69,18 +69,23 @@ class ResponseFormatText(TypedDict):
 
 
 class JSONSchema(TypedDict):
-    """Structured Outputs configuration options, including a JSON Schema."""
+    """Structured Outputs configuration options, including a JSON Schema.
+
+    The ``total=False`` class kwarg this used to carry can't appear
+    on MicroPython (1.27 doesn't accept class kwargs), so per-field
+    ``NotRequired[...]`` markers stand in. Same type-checker
+    semantics; works on both runtimes."""
 
     name: Required[str]  # pragma: no cover (micropython)
     """Must be a-z, A-Z, 0-9, underscores and dashes, max 64 chars."""  # pragma: no cover (micropython)
 
-    description: str  # pragma: no cover (micropython)
+    description: NotRequired[str]  # pragma: no cover (micropython)
     """Description of what the response format is for."""  # pragma: no cover (micropython)
 
-    schema: dict[str, object]  # pragma: no cover (micropython)
+    schema: NotRequired[dict[str, object]]  # pragma: no cover (micropython)
     """The schema for the response format, as a JSON Schema object."""  # pragma: no cover (micropython)
 
-    strict: Optional[bool]  # pragma: no cover (micropython)
+    strict: NotRequired[Optional[bool]]  # pragma: no cover (micropython)
     """Whether to enable strict schema adherence."""  # pragma: no cover (micropython)
 
 

@@ -689,9 +689,15 @@ class DirectExecutor:
                 return ToolResult(content=inline, content_file=None)
         try:
             streamer_result = streamer(**validated)
-        except TypeError as e:  # pragma: no cover (cpython)
-            # Wrong arity / param mismatch — only reachable on MP
-            # (CPython's pre-call check rejected misshapen tools).
+        except TypeError as e:
+            # Cross-runtime safety net for arity / param mismatches —
+            # an ``async def execute_streaming(self, foo): yield ...``
+            # called with kwargs that don't include ``foo`` raises
+            # ``TypeError`` on both runtimes. CPython's pre-call
+            # ``isasyncgenfunction`` doesn't validate the signature,
+            # only the function shape, so this branch is reachable
+            # on both. Surface as the same ``Error: ...`` shape
+            # ``ToolRegistry.execute`` returns on validation failure.
             return ToolResult(
                 content=f"Error executing {name}: {e}",
                 content_file=None,

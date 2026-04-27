@@ -21,9 +21,9 @@ protocol works identically on both runtimes.
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import TYPE_CHECKING
 
+from exoclaw._compat import monotonic_diff_ms, monotonic_ms
 from exoclaw.http import (
     HTTPConnectError,
     HTTPError,
@@ -38,11 +38,19 @@ if TYPE_CHECKING:
 
 
 def _deadline_ms(timeout_s: float) -> int:
-    return int(time.time() * 1000) + int(timeout_s * 1000)
+    """Compute a deadline off the monotonic clock (not wall clock).
+
+    On MP this maps to ``time.ticks_ms`` and pairs with
+    ``monotonic_diff_ms`` to handle wrap-around safely. Wall clock
+    (``time.time()``) is unsafe on a chip: NTP jumps push the
+    deadline arbitrarily, and on a freshly booted board with no RTC
+    the value is undefined."""
+    return monotonic_ms() + int(timeout_s * 1000)
 
 
 def _expired(deadline_ms: int) -> bool:
-    return int(time.time() * 1000) >= deadline_ms
+    """Has the deadline passed? Wrap-safe via ``monotonic_diff_ms``."""
+    return monotonic_diff_ms(deadline_ms, monotonic_ms()) <= 0
 
 
 async def _read_until_double_crlf(
@@ -386,10 +394,14 @@ class MPStreamCM:
             reader, writer = await asyncio.open_connection(host, port, ssl=ssl_arg)
         except OSError as e:
             raise HTTPConnectError("connect failed to {}:{}: {}".format(host, port, e)) from e
-        if _expired(deadline):
-            raise HTTPConnectError("connect deadline exceeded for {}:{}".format(host, port))
+        # Assign before the deadline check so ``_close_writer`` can
+        # find the socket on the leak path. ``_writer = None`` after
+        # close keeps ``__aexit__`` idempotent.
         self._reader = reader
         self._writer = writer
+        if _expired(deadline):
+            await self._close_writer()
+            raise HTTPConnectError("connect deadline exceeded for {}:{}".format(host, port))
 
         try:
             await self._send_request(writer, host, path, deadline)
@@ -465,6 +477,8 @@ class MPStreamCM:
         if content is None:
             writer.write(b"0\r\n\r\n")
             if drain is not None:
+                if _expired(deadline_ms):
+                    raise HTTPWriteTimeout("body write deadline exceeded")
                 await drain()
             return
 
@@ -475,6 +489,8 @@ class MPStreamCM:
                 )
             writer.write(b"0\r\n\r\n")
             if drain is not None:
+                if _expired(deadline_ms):
+                    raise HTTPWriteTimeout("body write deadline exceeded")
                 await drain()
             return
 
@@ -512,6 +528,8 @@ class MPStreamCM:
                     await drain()
         writer.write(b"0\r\n\r\n")
         if drain is not None:
+            if _expired(deadline_ms):
+                raise HTTPWriteTimeout("body write deadline exceeded")
             await drain()
 
 

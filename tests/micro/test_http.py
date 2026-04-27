@@ -487,6 +487,48 @@ def test_post_json_round_trips():
     assert client.captured["content"] == b'{"hello": "world"}'
 
 
+def test_read_until_double_crlf_raises_on_expired_deadline():
+    """Already-expired deadline surfaces as ``HTTPReadTimeout`` on
+    the first iteration — before any read."""
+    reader = _FakeReader([b"HTTP/1.1 200 OK\r\nX-A: 1\r\n\r\n"])
+    raised = False
+
+    async def _go():
+        nonlocal raised
+        try:
+            # Negative timeout → deadline already in the past.
+            await h_mp._read_until_double_crlf(reader, h_mp._deadline_ms(-1))
+        except h.HTTPReadTimeout:
+            raised = True
+
+    asyncio.run(_go())
+    assert raised
+
+
+def test_send_request_raises_on_expired_deadline():
+    """Same shape on the write side: pre-expired deadline surfaces
+    as ``HTTPWriteTimeout`` from the header drain check."""
+    writer = _FakeWriter()
+    cm = h_mp.MPStreamCM(
+        "https://x.test/y",
+        headers=None,
+        content=b'{"x":1}',
+        timeout=5.0,
+        ssl_context=None,
+    )
+    raised = False
+
+    async def _go():
+        nonlocal raised
+        try:
+            await cm._send_request(writer, "x.test", "/y", h_mp._deadline_ms(-1))
+        except h.HTTPWriteTimeout:
+            raised = True
+
+    asyncio.run(_go())
+    assert raised
+
+
 def test_read_until_double_crlf_max_bytes_cap():
     """Cap triggers when the head exceeds ``max_bytes`` without a
     terminator."""

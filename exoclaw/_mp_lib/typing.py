@@ -15,9 +15,11 @@
 # - ``runtime_checkable`` — must be a callable that returns its arg.
 # - ``TYPE_CHECKING`` — must be ``False`` so guarded imports don't run.
 #
-# Vendored under ``tests/_micropython_stubs/`` so the test rig can
-# import it via ``MICROPYPATH``. On a real MicroPython device, install
-# via ``mip install typing`` (micropython-lib ships a similar shim).
+# Lives under ``exoclaw/_mp_lib/`` — see the README in that
+# directory for how firmware authors freeze it via the manifest.
+# micropython-lib doesn't ship a typing module
+# (``micropython#15911`` proposes one but is stalled); we own the
+# shape until that lands or someone publishes a viable alternative.
 
 TYPE_CHECKING = False
 

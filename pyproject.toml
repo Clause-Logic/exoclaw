@@ -48,6 +48,11 @@ packages = ["exoclaw"]
 include = [
     "exoclaw/**/*.py",
     "exoclaw/py.typed",
+    # ``_mp_lib/`` ships fillers for typing + dataclasses (modules
+    # micropython-lib doesn't carry). The README inside it tells
+    # firmware authors how to freeze the directory in a manifest;
+    # bundle it with the wheel so the docs travel with the code.
+    "exoclaw/_mp_lib/README.md",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -92,6 +97,11 @@ ignore = ["E501"]
 # (``datetime`` lowercase, ``__init__`` synthesised inside
 # ``_make_init`` for the dataclasses stub).
 "tests/_micropython_stubs/*" = ["ANN", "N801", "N802", "N807"]
+# ``exoclaw/_mp_lib/`` is the production home of typing +
+# dataclasses fillers downstream firmware authors freeze in.
+# Same naming/typing relaxations as the test stubs — these mirror
+# stdlib shapes (``TypeVar``, synthesised ``__init__``).
+"exoclaw/_mp_lib/*" = ["ANN", "N801", "N802", "N807"]
 # The MicroPython runner and the test files it executes run on
 # MicroPython 1.27 — ``typing`` is a stub there and full ANN
 # annotations would just import-fail. Keep them pure-Python.

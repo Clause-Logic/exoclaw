@@ -26,3 +26,4 @@ scripts/upstream_prs_cache.json
 
 mise.local.toml
 .mp-stage/
+coverage.json

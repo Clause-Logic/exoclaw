@@ -649,13 +649,416 @@ def unbind_log_contextvars(*keys: str) -> None:
         pass
 
 
+# ── Pathlib shim ─────────────────────────────────────────────────────────────
+
+
+if IS_MICROPYTHON:  # pragma: no cover (cpython)
+    from typing import Iterator as _Iterator
+
+    class Path:
+        """Minimal ``pathlib.Path``-shaped class for MicroPython.
+
+        Plugins that handle paths (workspace dirs, skill dirs, JSONL
+        history, etc.) should import this from ``exoclaw._compat``
+        instead of ``pathlib`` directly. CPython gets the real
+        ``pathlib.Path``; MP gets this hand-rolled subset.
+
+        Supports the operations exoclaw plugins use: ``/``, ``str()``,
+        ``read_text``, ``write_text``, ``read_bytes``, ``write_bytes``,
+        ``exists``, ``is_file``, ``is_dir``, ``mkdir``, ``parent``,
+        ``name``, ``stem``, ``suffix``, ``expanduser``, ``resolve``,
+        ``relative_to``, ``iterdir``, ``glob`` (``*.ext`` only),
+        ``unlink``.
+
+        ``encoding`` kwargs on ``read_text`` / ``write_text`` are
+        accepted and ignored — MP's ``open`` is always UTF-8 in
+        text mode."""
+
+        __slots__ = ("_path",)
+
+        def __init__(self, *parts: object) -> None:
+            if len(parts) == 1 and isinstance(parts[0], Path):
+                # ``ty`` sees ``Path`` as a union (this MP class +
+                # ``pathlib.Path`` from the CPython branch) and can't
+                # confirm ``_path`` lives on the union. The runtime
+                # gate guarantees only the MP class is reachable here.
+                self._path = parts[0]._path  # type: ignore[unresolved-attribute]
+                return
+            cleaned: list[str] = []
+            for i, p in enumerate(parts):
+                s = str(p)
+                if not s:
+                    continue
+                if i > 0:
+                    s = s.lstrip("/")
+                cleaned.append(s.rstrip("/") if i < len(parts) - 1 else s)
+            joined = "/".join(cleaned) if cleaned else ""
+            while "//" in joined:
+                joined = joined.replace("//", "/")
+            self._path = joined or "."
+
+        def __str__(self) -> str:
+            return self._path
+
+        def __repr__(self) -> str:
+            return "Path({!r})".format(self._path)
+
+        def __truediv__(self, other: object) -> "Path":
+            return Path(self._path, str(other))
+
+        def __eq__(self, other: object) -> bool:
+            if isinstance(other, Path):
+                # See ``__init__`` for why ty needs the override here —
+                # the runtime gate keeps this branch MP-only.
+                return self._path == other._path  # type: ignore[unresolved-attribute]
+            return False
+
+        def __hash__(self) -> int:
+            return hash(self._path)
+
+        def __fspath__(self) -> str:
+            return self._path
+
+        @property
+        def parent(self) -> "Path":
+            idx = self._path.rfind("/")
+            if idx == -1:
+                return Path(".")
+            if idx == 0:
+                return Path("/")
+            return Path(self._path[:idx])
+
+        @property
+        def name(self) -> str:
+            return self._path.split("/")[-1]
+
+        @property
+        def stem(self) -> str:
+            n = self.name
+            i = n.rfind(".")
+            return n if i <= 0 else n[:i]
+
+        @property
+        def suffix(self) -> str:
+            n = self.name
+            i = n.rfind(".")
+            return "" if i <= 0 else n[i:]
+
+        def exists(self) -> bool:
+            try:
+                os.stat(self._path)
+                return True
+            except OSError:
+                return False
+
+        def is_file(self) -> bool:
+            try:
+                mode = os.stat(self._path)[0]
+            except OSError:
+                return False
+            return not (mode & 0o040000)
+
+        def is_dir(self) -> bool:
+            try:
+                mode = os.stat(self._path)[0]
+            except OSError:
+                return False
+            return bool(mode & 0o040000)
+
+        def mkdir(
+            self,
+            *,
+            parents: bool = False,
+            exist_ok: bool = False,
+            mode: int = 0o777,
+        ) -> None:
+            if parents and not self.parent.exists():
+                self.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.mkdir(self._path)
+            except OSError:
+                if not exist_ok or not self.is_dir():
+                    raise
+
+        def read_text(self, encoding: str | None = None) -> str:
+            with open(self._path) as fh:
+                return fh.read()
+
+        def write_text(self, content: str, encoding: str | None = None) -> int:
+            with open(self._path, "w") as fh:
+                return fh.write(content)
+
+        def read_bytes(self) -> bytes:
+            with open(self._path, "rb") as fh:
+                return fh.read()
+
+        def write_bytes(self, content: bytes) -> int:
+            with open(self._path, "wb") as fh:
+                return fh.write(content)
+
+        def expanduser(self) -> "Path":
+            if self._path.startswith("~"):
+                home = os.getenv("HOME", "/")
+                return Path(home + self._path[1:])
+            return self
+
+        def resolve(self) -> "Path":
+            # MP doesn't have ``realpath`` consistently. For exoclaw's
+            # use case (display in system prompt), the input path is
+            # already absolute or relative to a known root — resolving
+            # to the same string is acceptable.
+            return self
+
+        def relative_to(self, other: "Path | str") -> "Path":
+            other_s = str(other).rstrip("/")
+            # Segment-boundary check — match either the exact path
+            # or a prefix followed by ``/``. Bare ``startswith``
+            # would accept ``/tmp/x``.relative_to(``/tmp/xy``) which
+            # ``pathlib.Path`` rejects.
+            ok = self._path == other_s or self._path.startswith(other_s + "/")
+            if not ok:
+                raise ValueError("{!r} not under {!r}".format(self._path, other_s))
+            rest = self._path[len(other_s) :].lstrip("/")
+            return Path(rest)
+
+        def iterdir(self) -> "_Iterator[Path]":
+            try:
+                for nm in os.listdir(self._path):
+                    yield Path(self._path, nm)
+            except OSError:
+                return
+
+        def glob(self, pattern: str) -> "_Iterator[Path]":
+            # Minimal glob — supports ``*.ext`` patterns only. Used
+            # by plugin skill loaders for ``*.md`` style scans.
+            if not pattern.startswith("*."):
+                p = self / pattern
+                if p.exists():
+                    yield p
+                return
+            ext = pattern[1:]
+            for child in self.iterdir():
+                if child.name.endswith(ext):
+                    yield child
+
+        def unlink(self, missing_ok: bool = False) -> None:
+            try:
+                os.remove(self._path)
+            except OSError:
+                if not missing_ok:
+                    raise
+
+else:  # pragma: no cover (micropython)
+    from pathlib import Path  # noqa: F401  (re-exported)
+
+
+# ── WeakValueDictionary shim ─────────────────────────────────────────────────
+
+
+if IS_MICROPYTHON:  # pragma: no cover (cpython)
+
+    class WeakValueDictionary(dict):
+        """Plain ``dict`` on MicroPython — ``weakref`` doesn't ship.
+
+        Plugins use this as a per-key lock map (e.g. consolidation
+        locks keyed by session). On a single-tenant chip the small
+        bounded leak (one entry per key that ever existed) is
+        negligible. Inherits from ``dict`` so ``setdefault``/
+        ``__getitem__``/etc. work without extra method bodies."""
+
+else:  # pragma: no cover (micropython)
+    from weakref import WeakValueDictionary  # noqa: F401
+
+
+# ── Recursive directory delete ───────────────────────────────────────────────
+
+
+def rmtree(path: object) -> None:
+    """Recursively delete ``path``. ``shutil.rmtree`` on CPython,
+    hand-rolled walk-and-remove on MicroPython (which doesn't ship
+    ``shutil``)."""
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        _mp_rmtree(str(path))
+        return
+    import shutil  # pragma: no cover (micropython)
+
+    shutil.rmtree(str(path))  # pragma: no cover (micropython)
+
+
+def _mp_rmtree(path: str) -> None:  # pragma: no cover (cpython)
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    for nm in entries:
+        full = path.rstrip("/") + "/" + nm
+        try:
+            mode = os.stat(full)[0]
+        except OSError:
+            continue
+        if mode & 0o040000:
+            _mp_rmtree(full)
+        else:
+            try:
+                os.remove(full)
+            except OSError:
+                pass
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
+
+
+# ── Platform identifier ──────────────────────────────────────────────────────
+
+
+def platform_summary() -> str:
+    """Short runtime descriptor for system-prompt's ``Runtime`` block.
+
+    CPython: ``"<system> <machine>, Python <version>"``;
+    MicroPython: ``"<sysname> <machine>, MicroPython <version>"``
+    via ``os.uname()`` (the only cross-port API).
+    """
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        try:
+            uname = os.uname()
+            sysname = getattr(uname, "sysname", "micropython")
+            machine = getattr(uname, "machine", "")
+            release = getattr(uname, "release", "")
+            return "{} {}, MicroPython {}".format(sysname, machine, release).strip()
+        except Exception:
+            return "MicroPython"
+    import platform  # pragma: no cover (micropython)
+
+    system = platform.system()  # pragma: no cover (micropython)
+    machine = platform.machine()  # pragma: no cover (micropython)
+    py = platform.python_version()  # pragma: no cover (micropython)
+    label = "macOS" if system == "Darwin" else system  # pragma: no cover (micropython)
+    return f"{label} {machine}, Python {py}"  # pragma: no cover (micropython)
+
+
+# ── Image MIME guess ─────────────────────────────────────────────────────────
+
+
+_IMAGE_MIME_BY_EXT: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+}
+
+
+def guess_image_mime(path: str) -> str | None:
+    """Extension-based MIME guess for the image-attachment path.
+
+    Returns ``image/*`` for known image extensions, ``None`` for
+    everything else. CPython delegates to ``mimetypes.guess_type``
+    and filters to image-only so callers get the same answer as
+    on MicroPython (where the lookup table is image-only by
+    construction). Supported formats: ``png``, ``jpeg``, ``gif``,
+    ``webp``, ``bmp``."""
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        path_lower = path.lower()
+        for ext, mime in _IMAGE_MIME_BY_EXT.items():
+            if path_lower.endswith(ext):
+                return mime
+        return None
+    import mimetypes  # pragma: no cover (micropython)
+
+    mime, _ = mimetypes.guess_type(path)  # pragma: no cover (micropython)
+    if mime is None or not mime.startswith("image/"):  # pragma: no cover (micropython)
+        return None
+    return mime  # pragma: no cover (micropython)
+
+
+# ── Executable lookup / X_OK shim ────────────────────────────────────────────
+
+
+def which(binary: str) -> str | None:
+    """Look up an executable on ``PATH``. ``shutil.which`` on CPython,
+    ``None`` on MicroPython.
+
+    MP on a microcontroller has no ``PATH`` and no subprocesses, so
+    ``which`` always returns ``None``. Plugin skill loaders use this
+    to decide whether a skill's ``requires.bins`` are met — on a
+    chip the answer is always "no", which is correct."""
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        return None
+    import shutil  # pragma: no cover (micropython)
+
+    return shutil.which(binary)  # pragma: no cover (micropython)
+
+
+class aiter_compat:  # noqa: N801  — lower-case mirrors stdlib ``aiter``
+    """Wrap a generator so ``async for`` works on both runtimes.
+
+    CPython compiles ``async def f(): yield`` into an async
+    generator with ``__aiter__`` / ``__anext__``. MicroPython 1.27
+    compiles the same construct into a plain generator that has
+    neither. Iterating the latter with ``async for`` raises
+    ``AttributeError: 'generator' object has no attribute
+    '__aiter__'`` on MP.
+
+    ``aiter_compat(gen)`` adapts either shape:
+
+    .. code-block:: python
+
+        async for chunk in aiter_compat(_my_streaming_gen()):
+            ...
+
+    No-op overhead on CPython (passes through async ``__anext__``);
+    on MicroPython, translates ``StopIteration`` from the
+    underlying sync generator into ``StopAsyncIteration`` so the
+    caller's ``async for`` exits cleanly."""
+
+    __slots__ = ("_iter", "_is_async")
+
+    def __init__(self, gen: Any) -> None:
+        if hasattr(gen, "__aiter__"):
+            self._iter = gen.__aiter__()
+            self._is_async = True
+        else:
+            self._iter = iter(gen)
+            self._is_async = False
+
+    def __aiter__(self) -> "aiter_compat":
+        return self
+
+    async def __anext__(self) -> Any:
+        if self._is_async:
+            return await self._iter.__anext__()
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+def is_executable(path: object) -> bool:
+    """Check if ``path`` is executable. ``os.access(path, os.X_OK)``
+    on CPython, always ``False`` on MicroPython (no subprocesses)."""
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        return False
+    return os.access(str(path), os.X_OK)  # pragma: no cover (micropython)
+
+
 __all__ = [
     "IS_MICROPYTHON",
+    "Path",
     "TaskLocal",
+    "WeakValueDictionary",
+    "aiter_compat",
     "bind_log_contextvars",
     "decode_utf8_lossy",
     "get_log_contextvars",
     "get_logger",
+    "guess_image_mime",
+    "is_executable",
     "isasyncgenfunction",
     "isawaitable",
     "iscoroutinefunction",
@@ -667,6 +1070,9 @@ __all__ = [
     "open_text_writer",
     "path_basename",
     "path_exists",
+    "platform_summary",
     "random_bytes",
+    "rmtree",
     "unbind_log_contextvars",
+    "which",
 ]

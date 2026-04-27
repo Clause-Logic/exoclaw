@@ -198,3 +198,282 @@ def test_stub_logger_emits_json():
     log.exception("exc_event", exc="boom")
     # bind() is a no-op that returns self.
     assert log.bind(extra="ok") is log
+
+
+# ── Path shim coverage ───────────────────────────────────────────
+
+
+def test_path_construction_and_join():
+    """Path joining via ``/`` and varargs construction. The
+    constructor strips leading ``/`` from non-first parts and
+    collapses repeated slashes."""
+    p = c.Path("/tmp", "exoclaw", "test")
+    assert str(p) == "/tmp/exoclaw/test"
+
+    # ``/`` operator returns a new Path
+    p2 = c.Path("/tmp") / "child"
+    assert str(p2) == "/tmp/child"
+
+    # Repeated slashes collapse
+    p3 = c.Path("/tmp//", "//child")
+    assert str(p3) == "/tmp/child"
+
+    # Empty input → "."
+    p4 = c.Path()
+    assert str(p4) == "."
+
+    # Path-from-Path is the identity copy
+    p5 = c.Path(p2)
+    assert str(p5) == str(p2)
+
+    # __repr__ wraps the string
+    assert "Path(" in repr(p2)
+
+
+def test_path_eq_hash_fspath():
+    """__eq__ matches by string; __hash__ + __fspath__ work."""
+    a = c.Path("/tmp/x")
+    b = c.Path("/tmp/x")
+    assert a == b
+    # Comparison with a non-Path object returns False (no error).
+    assert (a == "/tmp/x") is False
+    assert hash(a) == hash(b)
+    assert a.__fspath__() == "/tmp/x"
+
+
+def test_path_parent_name_stem_suffix():
+    """parent / name / stem / suffix derive from the string path
+    without touching disk."""
+    p = c.Path("/tmp/exoclaw/SKILL.md")
+    assert str(p.parent) == "/tmp/exoclaw"
+    assert p.name == "SKILL.md"
+    assert p.stem == "SKILL"
+    assert p.suffix == ".md"
+
+    # No-extension case
+    plain = c.Path("/tmp/README")
+    assert plain.stem == "README"
+    assert plain.suffix == ""
+
+    # Root
+    root = c.Path("/")
+    assert str(root.parent) == "/"
+
+    # Bare name
+    bare = c.Path("name")
+    assert str(bare.parent) == "."
+
+
+def test_path_filesystem_ops(tmp_path=None):
+    """exists/is_file/is_dir/mkdir/read_text/write_text/read_bytes/
+    write_bytes/unlink/iterdir round-trip."""
+    base = c.Path("/tmp", "upy-path-{}".format(id(c.Path)))
+    # Clean any prior leftover (test re-run safety).
+    if base.exists():
+        c.rmtree(str(base))
+
+    # mkdir(parents=True, exist_ok=True)
+    inner = base / "child" / "grand"
+    inner.mkdir(parents=True, exist_ok=True)
+    assert inner.exists()
+    assert inner.is_dir()
+    assert not inner.is_file()
+    # Re-mkdir with exist_ok is a no-op
+    inner.mkdir(exist_ok=True)
+
+    # write_text / read_text
+    f = inner / "hello.txt"
+    f.write_text("héllo", encoding="utf-8")
+    assert f.exists()
+    assert f.is_file()
+    assert not f.is_dir()
+    assert f.read_text() == "héllo"
+
+    # write_bytes / read_bytes
+    fb = inner / "bin.dat"
+    n = fb.write_bytes(b"\x00\x01\x02")
+    assert n == 3
+    assert fb.read_bytes() == b"\x00\x01\x02"
+
+    # iterdir
+    names = sorted(p.name for p in inner.iterdir())
+    assert names == ["bin.dat", "hello.txt"]
+
+    # glob *.txt
+    matches = sorted(str(p) for p in inner.glob("*.txt"))
+    assert any(m.endswith("hello.txt") for m in matches)
+
+    # glob non-pattern (literal child)
+    lit = list(inner.glob("hello.txt"))
+    assert len(lit) == 1
+
+    # iterdir on a missing dir is a clean empty iterator
+    missing = c.Path("/tmp/upy-does-not-exist-{}".format(id(c.Path)))
+    assert list(missing.iterdir()) == []
+
+    # unlink with missing_ok
+    f.unlink()
+    assert not f.exists()
+    f.unlink(missing_ok=True)
+
+    # rmtree wipes the whole subtree
+    c.rmtree(str(base))
+    assert not base.exists()
+
+
+def test_path_expanduser_resolve_relative_to():
+    """expanduser respects $HOME; resolve is a no-op; relative_to
+    strips a prefix or raises."""
+    # MP doesn't ship ``os.environ``; ``os.getenv`` is the cross-port
+    # API. ``Path.expanduser`` reads ``HOME`` via ``os.getenv``;
+    # under unix-port MP HOME is set by the parent shell, so we just
+    # exercise the path-rewrite logic on whatever HOME is.
+    home = os.getenv("HOME") or "/"
+    e = c.Path("~/cfg").expanduser()
+    assert str(e) == home.rstrip("/") + "/cfg" or str(e) == home + "/cfg"
+    # Non-tilde paths pass through unchanged
+    assert str(c.Path("/abs").expanduser()) == "/abs"
+
+    # resolve is the same Path on MP
+    p = c.Path("/tmp/x")
+    assert p.resolve() is p
+
+    # relative_to strips prefix
+    rel = c.Path("/tmp/x/y").relative_to("/tmp")
+    assert str(rel) == "x/y"
+
+    raised = False
+    try:
+        c.Path("/tmp/x").relative_to("/etc")
+    except ValueError:
+        raised = True
+    assert raised
+
+
+def test_weak_value_dictionary_is_dict_on_mp():
+    """On MP, ``WeakValueDictionary`` is a plain ``dict`` subclass.
+    Plugin per-key lock maps work via ``setdefault``."""
+    d = c.WeakValueDictionary()
+    assert isinstance(d, dict)
+    obj = object()
+    d.setdefault("k", obj)
+    assert d["k"] is obj
+
+
+def test_rmtree_handles_missing_path():
+    """rmtree on a missing path is a no-op (matches shutil.rmtree
+    when called via the public helper that swallows errors)."""
+    # _mp_rmtree on a missing path should not crash.
+    c.rmtree("/tmp/upy-missing-{}".format(id(c.Path)))
+
+
+def test_platform_summary_returns_string():
+    """``platform_summary()`` returns a non-empty descriptor."""
+    s = c.platform_summary()
+    assert isinstance(s, str)
+    assert len(s) > 0
+
+
+def test_guess_image_mime_extensions():
+    """Extension-based MIME guess covers the formats exoclaw's
+    image-attachment path supports."""
+    assert c.guess_image_mime("/tmp/foo.png") == "image/png"
+    assert c.guess_image_mime("/tmp/foo.JPG") == "image/jpeg"
+    assert c.guess_image_mime("/tmp/foo.jpeg") == "image/jpeg"
+    assert c.guess_image_mime("/tmp/foo.gif") == "image/gif"
+    assert c.guess_image_mime("/tmp/foo.webp") == "image/webp"
+    assert c.guess_image_mime("/tmp/foo.bmp") == "image/bmp"
+    # Unknown extension → None
+    assert c.guess_image_mime("/tmp/foo.txt") is None
+
+
+def test_which_returns_none_on_micropython():
+    """MP has no PATH; ``which`` always returns None."""
+    assert c.which("python") is None
+    assert c.which("doesnotexist123") is None
+
+
+def test_is_executable_returns_false_on_micropython():
+    """MP has no subprocesses; ``is_executable`` always returns False."""
+    assert c.is_executable("/bin/sh") is False
+    assert c.is_executable("/tmp/anything") is False
+
+
+def test_path_skips_empty_parts():
+    """``Path("a", "", "b")`` skips the empty middle — covers the
+    ``if not s: continue`` branch in ``__init__``."""
+    p = c.Path("/tmp", "", "x")
+    assert str(p) == "/tmp/x"
+
+
+def test_path_basename_with_no_separator():
+    """``path_basename`` without a ``/`` returns the input unchanged."""
+    assert c.path_basename("plain") == "plain"
+
+
+def test_async_queue_size_and_put_nowait():
+    """Cover the synchronous surface of ``_AsyncQueue``: ``qsize``
+    and ``put_nowait`` (no-await variants of the put path)."""
+    q = c.make_async_queue()
+    assert q.qsize() == 0
+    q.put_nowait("x")
+    assert q.qsize() == 1
+    assert q.empty() is False
+
+
+def test_unbind_log_contextvars_without_bag():
+    """``unbind_log_contextvars`` is a no-op when the per-task bag
+    hasn't been bound yet."""
+    # Fresh task storage (or at least no log-ctx bag for *this* var).
+    c.unbind_log_contextvars("never_bound_key")
+
+
+# ── aiter_compat coverage ───────────────────────────────────────
+
+
+def test_aiter_compat_wraps_sync_generator():
+    """``async def f(): yield`` on MP is a sync generator;
+    ``aiter_compat`` exposes it as ``async for``-iterable."""
+    import asyncio as _asyncio
+
+    async def _agen():
+        yield 1
+        yield 2
+        yield 3
+
+    out = []
+
+    async def _drive():
+        async for x in c.aiter_compat(_agen()):
+            out.append(x)
+
+    _asyncio.run(_drive())
+    assert out == [1, 2, 3]
+
+
+def test_aiter_compat_wraps_class_async_iterator():
+    """A class implementing ``__aiter__`` / ``__anext__`` is left
+    untouched — ``aiter_compat`` just delegates."""
+    import asyncio as _asyncio
+
+    class _ClassIter:
+        def __init__(self):
+            self._i = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._i >= 2:
+                raise StopAsyncIteration
+            self._i += 1
+            return self._i * 10
+
+    out = []
+
+    async def _drive():
+        async for x in c.aiter_compat(_ClassIter()):
+            out.append(x)
+
+    _asyncio.run(_drive())
+    assert out == [10, 20]

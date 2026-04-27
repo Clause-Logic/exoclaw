@@ -23,11 +23,14 @@ import inspect
 import io
 import json
 import os
+import pathlib
 import secrets
 import sys
 import tempfile
 import threading
 from collections.abc import AsyncIterator
+
+import pytest
 
 from exoclaw import _compat as c
 
@@ -313,3 +316,114 @@ def test_async_queue_round_trip() -> None:
         assert fallback.empty() is True
 
     asyncio.run(_fallback_round_trip())
+
+
+class TestAiterCompat:
+    """``aiter_compat`` adapts sync OR async generators to the
+    ``async for`` protocol. CPython's branch wraps real async
+    generators (``__aiter__`` path); the sync-fallback branch
+    matters for MicroPython callers but must still be exercised
+    here so the CPython coverage gate sees both."""
+
+    @pytest.mark.asyncio
+    async def test_async_generator_passes_through(self) -> None:
+        """``async def`` + ``yield`` produces an async generator on
+        CPython — ``aiter_compat`` should detect ``__aiter__`` and
+        delegate to the async iter protocol."""
+        from exoclaw._compat import aiter_compat
+
+        async def _agen() -> AsyncIterator[str]:
+            yield "a"
+            yield "b"
+
+        out = []
+        async for item in aiter_compat(_agen()):
+            out.append(item)
+        assert out == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_class_based_async_iter_delegates(self) -> None:
+        """A class implementing ``__aiter__`` / ``__anext__`` is left
+        untouched — ``aiter_compat`` just reuses its protocol."""
+        from exoclaw._compat import aiter_compat
+
+        class _ClassIter:
+            def __init__(self) -> None:
+                self._i = 0
+
+            def __aiter__(self) -> "_ClassIter":
+                return self
+
+            async def __anext__(self) -> int:
+                if self._i >= 3:
+                    raise StopAsyncIteration
+                self._i += 1
+                return self._i
+
+        out = []
+        async for item in aiter_compat(_ClassIter()):
+            out.append(item)
+        assert out == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_sync_iterable_translates_stop_iteration(self) -> None:
+        """A plain sync iterable (the shape MP produces from
+        ``async def`` + ``yield``) gets bridged by translating
+        ``StopIteration`` to ``StopAsyncIteration``."""
+        from exoclaw._compat import aiter_compat
+
+        out = []
+        async for item in aiter_compat(iter([10, 20, 30])):
+            out.append(item)
+        assert out == [10, 20, 30]
+
+
+class TestCPythonShimDelegations:
+    """Cover the CPython branches of cross-runtime helpers — they
+    delegate to stdlib so the tests are mostly "the call doesn't
+    explode." Without these the gate counts these one-liners
+    against the threshold."""
+
+    def test_rmtree_removes_directory_tree(self, tmp_path: pathlib.Path) -> None:
+        from exoclaw._compat import rmtree
+
+        target = tmp_path / "tree"
+        (target / "a" / "b").mkdir(parents=True)
+        (target / "a" / "b" / "leaf.txt").write_text("x")
+        rmtree(target)
+        assert not target.exists()
+
+    def test_platform_summary_returns_descriptive_string(self) -> None:
+        from exoclaw._compat import platform_summary
+
+        out = platform_summary()
+        # CPython branch should mention Python version.
+        assert "Python" in out
+
+    def test_guess_image_mime_recognises_image_extensions(self) -> None:
+        from exoclaw._compat import guess_image_mime
+
+        assert guess_image_mime("/tmp/foo.png") == "image/png"
+        assert guess_image_mime("/tmp/foo.jpeg") == "image/jpeg"
+
+    def test_guess_image_mime_returns_none_for_non_images(self) -> None:
+        """Copilot review fix — CPython branch was leaking
+        non-image MIMEs (``text/plain`` etc.) because
+        ``mimetypes.guess_type`` returns whatever it finds."""
+        from exoclaw._compat import guess_image_mime
+
+        assert guess_image_mime("/tmp/foo.txt") is None
+        assert guess_image_mime("/tmp/foo.py") is None
+
+    def test_which_delegates_to_shutil(self) -> None:
+        from exoclaw._compat import which
+
+        # ``sh`` exists on every CI box we run on.
+        assert which("sh") is not None
+        assert which("definitely-not-a-real-binary-xxxyyyzzz") is None
+
+    def test_is_executable_delegates_to_os_access(self) -> None:
+        from exoclaw._compat import is_executable
+
+        assert is_executable("/bin/sh") is True
+        assert is_executable("/definitely/not/a/real/path") is False

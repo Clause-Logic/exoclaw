@@ -47,6 +47,12 @@ _RUNNER = _REPO_ROOT / "tests" / "_micropython_runner" / "run.py"
 _MICRO_TESTS_DIR = _REPO_ROOT / "tests" / "micro"
 _STUBS_DIR = _REPO_ROOT / "tests" / "_micropython_stubs"
 _EXOCLAW_PKG = _REPO_ROOT / "exoclaw"
+# Production MP-runtime fillers live under ``exoclaw/_mp_lib/`` so
+# downstream firmware builds can freeze them. The test runner pulls
+# them in alongside the test-only stubs (``datetime`` /
+# ``__future__``) so test runs see the same surface a real device
+# would after a manifest freeze.
+_MP_LIB_DIR = _EXOCLAW_PKG / "_mp_lib"
 
 _COVERAGE_THRESHOLD = 0.95
 
@@ -223,11 +229,32 @@ def _run_micropython_suite(binary: str, tmp_path: Path) -> dict:
     # Copy the full package preserving directory structure. The
     # runner sets ``MICROPYPATH`` to the stage so ``import exoclaw``
     # resolves through this copy.
-    shutil.copytree(_EXOCLAW_PKG, stage / "exoclaw")
-    # Vendored stubs sit at the stage root so ``import typing`` /
-    # ``import dataclasses`` / ``import datetime`` resolve to the
-    # stubs before MicroPython's frozen modules. ``.frozen`` stays
-    # earlier on the path so frozen ``asyncio`` still wins.
+    #
+    # ``_cpython.py`` siblings (e.g. ``http/_cpython.py``) hold
+    # CPython-only implementations gated behind a runtime branch in
+    # the package's ``__init__.py``. MicroPython never imports them,
+    # so staging them only confuses the coverage gate (the runner
+    # would report 0% on bytecode it never reaches). Filter at copy
+    # time.
+    shutil.copytree(
+        _EXOCLAW_PKG,
+        stage / "exoclaw",
+        # ``_mp_lib/`` is build-time content for downstream
+        # firmware authors — flattened to the stage root by the
+        # loop below. Skipping it during the package copy keeps
+        # the coverage gate from scanning files that aren't part
+        # of core's runtime surface.
+        ignore=shutil.ignore_patterns("_cpython.py", "__pycache__", "_mp_lib"),
+    )
+    # MP-runtime fillers (typing, dataclasses) live in
+    # ``exoclaw/_mp_lib/`` for downstream firmware freezing — the
+    # test runner pulls them in too so the staged tree mirrors a
+    # real device after a manifest freeze. Test-only stubs
+    # (``datetime``, ``__future__``) remain under
+    # ``tests/_micropython_stubs/``; production manifests pull
+    # those from micropython-lib via ``require()`` instead.
+    for fill in _MP_LIB_DIR.glob("*.py"):
+        shutil.copy(fill, stage / fill.name)
     for stub in _STUBS_DIR.glob("*.py"):
         shutil.copy(stub, stage / stub.name)
 
@@ -240,6 +267,13 @@ def _run_micropython_suite(binary: str, tmp_path: Path) -> dict:
     result = subprocess.run(
         [
             binary,
+            # Bump the GC heap so the runner can hold all the test
+            # modules' bytecode + the per-test trace tables.
+            # ``test_http.py`` pushes the default 1 MiB heap over the
+            # edge with a 27 KiB code-object allocation that fails
+            # mid-import. 8 MiB matches the ESP32-S3 8 MiB target.
+            "-X",
+            "heapsize=8M",
             str(_RUNNER),
             "--tests-dir",
             str(_MICRO_TESTS_DIR),

@@ -21,11 +21,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+http = [
+    # ``exoclaw.http.HTTPClient`` uses ``httpx`` on CPython for
+    # connection pooling + battle-tested HTTP parsing. MicroPython
+    # uses a hand-rolled stdlib path, so it doesn't need this dep.
+    "httpx>=0.27.0",
+]
 dev = [
     "pytest>=9.0.0,<10.0.0",
     "pytest-asyncio>=1.3.0,<2.0.0",
     "ruff>=0.1.0",
     "ty>=0.0.1",
+    # ``exoclaw.http`` tests exercise the CPython httpx path.
+    "httpx>=0.27.0",
 ]
 
 [build-system]
@@ -40,6 +48,11 @@ packages = ["exoclaw"]
 include = [
     "exoclaw/**/*.py",
     "exoclaw/py.typed",
+    # ``_mp_lib/`` ships fillers for typing + dataclasses (modules
+    # micropython-lib doesn't carry). The README inside it tells
+    # firmware authors how to freeze the directory in a manifest;
+    # bundle it with the wheel so the docs travel with the code.
+    "exoclaw/_mp_lib/README.md",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -84,6 +97,11 @@ ignore = ["E501"]
 # (``datetime`` lowercase, ``__init__`` synthesised inside
 # ``_make_init`` for the dataclasses stub).
 "tests/_micropython_stubs/*" = ["ANN", "N801", "N802", "N807"]
+# ``exoclaw/_mp_lib/`` is the production home of typing +
+# dataclasses fillers downstream firmware authors freeze in.
+# Same naming/typing relaxations as the test stubs — these mirror
+# stdlib shapes (``TypeVar``, synthesised ``__init__``).
+"exoclaw/_mp_lib/*" = ["ANN", "N801", "N802", "N807"]
 # The MicroPython runner and the test files it executes run on
 # MicroPython 1.27 — ``typing`` is a stub there and full ANN
 # annotations would just import-fail. Keep them pure-Python.
@@ -100,7 +118,18 @@ testpaths = ["tests"]
 addopts = "--ignore=tests/micro --ignore=tests/_micropython_runner --ignore=tests/_micropython_stubs"
 
 [tool.coverage.run]
-omit = ["tests/micro/*", "tests/_micropython_runner/*"]
+omit = [
+    "tests/micro/*",
+    "tests/_micropython_runner/*",
+    # MP-runtime fillers core ships for plugin firmware authors —
+    # never imported on CPython (real ``typing`` / ``dataclasses``
+    # win on stdlib resolution order). The MP gate covers them.
+    "exoclaw/_mp_lib/*",
+    # MP-only HTTP backend — selected by ``HTTPClient`` only when
+    # ``IS_MICROPYTHON``. CPython runs ``http/_cpython.py``; the
+    # MP gate covers ``_mp.py`` end-to-end with in-memory fakes.
+    "exoclaw/http/_mp.py",
+]
 
 [tool.coverage.report]
 # Per-runtime exclusion. The negative-lookahead matches

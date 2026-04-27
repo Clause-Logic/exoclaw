@@ -17,8 +17,11 @@
 # - Validation of ``default_factory`` vs mutable default. CPython
 #   raises on ``field(default=[])``; this stub doesn't bother.
 #
-# Vendored under ``tests/_micropython_stubs/``. On a real MicroPython
-# device, ``mip install dataclasses`` (micropython-lib).
+# Lives under ``exoclaw/_mp_lib/`` — see the README in that
+# directory for how downstream firmware authors freeze it via the
+# manifest. micropython-lib doesn't ship a dataclasses package, so
+# there's no upstream alternative; if [micropython-lib#XYZ] ever
+# adds one we'll require() it instead.
 
 
 _MISSING = object()
@@ -90,7 +93,12 @@ def _make_init(cls, fields):
                 attr = getattr(cls, name, _MISSING)
                 if isinstance(attr, _Field):
                     if attr.default_factory is not _MISSING:
-                        setattr(self, name, attr.default_factory())
+                        # ``default_factory`` is typed as ``object``
+                        # because the slot also holds the ``_MISSING``
+                        # sentinel; the ``is not _MISSING`` guard
+                        # above narrows it to a real callable in
+                        # practice.
+                        setattr(self, name, attr.default_factory())  # type: ignore[call-non-callable]
                     elif attr.default is not _MISSING:
                         setattr(self, name, attr.default)
                     else:

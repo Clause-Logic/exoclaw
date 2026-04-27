@@ -271,6 +271,172 @@ def test_validate_params_number_wrong_type():
     assert any("number" in e.lower() for e in errors)
 
 
+def test_cast_params_non_object_schema_short_circuits():
+    """If the tool's top-level schema isn't ``type: object``,
+    ``cast_params`` returns the input unchanged. Edge case for
+    tools with primitive-typed top-level schemas (rare)."""
+
+    class _StringTool(ToolBase):
+        name = "st"
+        description = "x"
+        parameters = {"type": "string"}  # not object — short-circuit
+
+    out = _StringTool().cast_params({"k": "v"})
+    assert out == {"k": "v"}
+
+
+def test_cast_object_with_non_dict_input():
+    """``_cast_object`` returns the input unchanged when the input
+    isn't a dict — shouldn't crash on an unexpected shape from the
+    LLM."""
+
+    class _T(ToolBase):
+        name = "t"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+    # Internal call with a non-dict value.
+    out = _T()._cast_object("not-a-dict", {"type": "object"})
+    assert out == "not-a-dict"
+
+
+def test_cast_object_with_non_dict_properties():
+    """If ``schema.properties`` isn't a dict (corrupt schema),
+    ``_cast_object`` returns the input dict unchanged."""
+
+    class _T(ToolBase):
+        name = "t"
+        description = "x"
+        parameters = {"type": "object", "properties": "bogus"}
+
+    out = _T().cast_params({"k": "v"})
+    assert out == {"k": "v"}
+
+
+def test_cast_value_with_no_type():
+    """``_cast_value`` returns the input unchanged when the schema
+    doesn't have a ``type`` key (or it's not a string)."""
+
+    class _T(ToolBase):
+        name = "t"
+        description = "x"
+        parameters = {
+            "type": "object",
+            "properties": {"k": {}},  # no type
+        }
+
+    out = _T().cast_params({"k": "v"})
+    assert out == {"k": "v"}
+
+
+def test_cast_value_unknown_target_type_passes_through():
+    """Unknown ``type`` value (not in ``_TYPE_MAP``) → passthrough.
+    Reaches the final ``return val`` in ``_cast_value``."""
+
+    class _T(ToolBase):
+        name = "t"
+        description = "x"
+        parameters = {
+            "type": "object",
+            "properties": {"k": {"type": "exotic"}},
+        }
+
+    out = _T().cast_params({"k": "x"})
+    assert out == {"k": "x"}
+
+
+def test_cast_value_correct_primitive_types_passthrough():
+    """``_cast_value`` short-circuits for already-correct primitive
+    types — boolean, integer, string, number — without coercing.
+    Covers each ``return val`` early-exit branch."""
+
+    class _BoolT(ToolBase):
+        name = "b"
+        description = "x"
+        parameters = {"type": "object", "properties": {"k": {"type": "boolean"}}}
+
+    class _IntT(ToolBase):
+        name = "i"
+        description = "x"
+        parameters = {"type": "object", "properties": {"k": {"type": "integer"}}}
+
+    class _NumT(ToolBase):
+        name = "n"
+        description = "x"
+        parameters = {"type": "object", "properties": {"k": {"type": "number"}}}
+
+    assert _BoolT().cast_params({"k": True}) == {"k": True}
+    assert _IntT().cast_params({"k": 5}) == {"k": 5}
+    assert _NumT().cast_params({"k": 3.5}) == {"k": 3.5}
+
+
+def test_cast_array_without_items_schema_passthrough():
+    """``array`` schema without ``items`` → return the list as-is
+    (no per-item coercion)."""
+
+    class _T(ToolBase):
+        name = "t"
+        description = "x"
+        parameters = {
+            "type": "object",
+            "properties": {"k": {"type": "array"}},
+        }
+
+    out = _T().cast_params({"k": [1, "two", 3.5]})
+    assert out == {"k": [1, "two", 3.5]}
+
+
+def test_validate_params_string_field_wrong_type():
+    """A string-typed field given a non-string value → ``should be
+    string`` error. Hits the generic ``not in (integer, number)``
+    type-check branch in ``_validate``."""
+
+    class _StrTool(ToolBase):
+        name = "st"
+        description = "x"
+        parameters = {
+            "type": "object",
+            "properties": {"k": {"type": "string"}},
+        }
+
+    errors = _StrTool().validate_params({"k": 42})
+    assert any("string" in e.lower() for e in errors)
+
+
+def test_validate_params_array_field_wrong_type():
+    """``array`` field given a non-list → wrong-type error."""
+
+    class _ArrTool(ToolBase):
+        name = "at"
+        description = "x"
+        parameters = {
+            "type": "object",
+            "properties": {"k": {"type": "array"}},
+        }
+
+    errors = _ArrTool().validate_params({"k": "not-a-list"})
+    assert any("array" in e.lower() for e in errors)
+
+
+def test_validate_params_non_object_schema_raises():
+    """``validate_params`` raises ``ValueError`` when the top-level
+    schema isn't ``type: object`` — that's a misconfigured tool, not
+    a runtime input issue, so it raises rather than returning errors."""
+
+    class _BrokenT(ToolBase):
+        name = "br"
+        description = "x"
+        parameters = {"type": "string"}
+
+    raised = False
+    try:
+        _BrokenT().validate_params({})
+    except ValueError as e:
+        raised = True
+        assert "object" in str(e).lower()
+    assert raised
+
+
 def test_validate_params_nested_object():
     """Nested ``object`` schemas recurse — required fields inside the
     nested object are checked too."""

@@ -91,9 +91,9 @@ def make_lock() -> Any:
     """
     if IS_MICROPYTHON:  # pragma: no cover (cpython)
         return _NoopLock()
-    from threading import Lock
+    from threading import Lock  # pragma: no cover (micropython)
 
-    return Lock()
+    return Lock()  # pragma: no cover (micropython)
 
 
 # ── Task-local state (mirrors ``ContextVar`` API) ────────────────────────────

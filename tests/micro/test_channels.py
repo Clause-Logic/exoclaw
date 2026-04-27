@@ -144,6 +144,102 @@ def test_dispatch_unknown_channel_logged():
     asyncio.run(_go())
 
 
+def test_channel_start_exception_logged_not_raised():
+    """A channel whose ``start`` raises shouldn't crash the
+    manager — the exception is logged (``channel_start_error``)
+    and the manager continues with whatever channels did start."""
+
+    class _BrokenStart:
+        name = "broken"
+        started = False
+
+        async def start(self, bus):
+            raise RuntimeError("start failed")
+
+        async def stop(self):
+            pass
+
+        async def send(self, msg):
+            pass
+
+    bus = MessageBus()
+    a = _RecordingChannel("good")
+    b = _BrokenStart()
+    mgr = ChannelManager([a, b], bus)
+
+    async def _go():
+        await mgr.start_all()
+        # The good channel started; the broken one didn't crash the manager.
+        assert a.started is True
+        await mgr.stop_all()
+
+    asyncio.run(_go())
+
+
+def test_channel_stop_exception_logged_not_raised():
+    """``stop_all`` ignores exceptions from individual channel
+    ``stop`` calls — same defensive posture as ``start_all``."""
+
+    class _BrokenStop:
+        name = "broken"
+
+        async def start(self, bus):
+            pass
+
+        async def stop(self):
+            raise RuntimeError("stop failed")
+
+        async def send(self, msg):
+            pass
+
+    bus = MessageBus()
+    a = _RecordingChannel("good")
+    b = _BrokenStop()
+    mgr = ChannelManager([a, b], bus)
+
+    async def _go():
+        await mgr.start_all()
+        # Should not raise.
+        await mgr.stop_all()
+        assert a.stopped is True
+
+    asyncio.run(_go())
+
+
+def test_channel_send_exception_logged_not_raised():
+    """A channel whose ``send`` raises during outbound dispatch
+    doesn't crash the manager — logged as ``outbound_send_error``
+    and the dispatch loop continues."""
+
+    class _BrokenSend:
+        name = "bad"
+
+        async def start(self, bus):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def send(self, msg):
+            raise RuntimeError("send failed")
+
+    bus = MessageBus()
+    mgr = ChannelManager([_BrokenSend()], bus)
+
+    async def _go():
+        await mgr.start_all()
+        out = OutboundMessage(channel="bad", chat_id="x", content="hi")
+        await bus.publish_outbound(out)
+        # Yield to let dispatch try to send. No exception should propagate.
+        await asyncio.sleep(0.05)
+        # Subsequent publishes still work — the loop didn't die.
+        await bus.publish_outbound(OutboundMessage(channel="bad", chat_id="x", content="hi2"))
+        await asyncio.sleep(0.05)
+        await mgr.stop_all()
+
+    asyncio.run(_go())
+
+
 def test_filter_tool_hints():
     """When ``filter_tool_hints=True`` the manager drops outbound
     messages tagged with ``_tool_hint`` in metadata. Used by some

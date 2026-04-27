@@ -123,6 +123,69 @@ def test_make_scratch_path_default_dir():
         os.remove(p)
 
 
+def test_isawaitable_distinguishes_awaitables():
+    """``isawaitable`` returns True for coroutines / generators
+    (anything with ``__await__`` or ``send``) and False for plain
+    values."""
+
+    async def _coro():
+        return 1
+
+    awaitable = _coro()
+    assert c.isawaitable(awaitable) is True
+    # Plain value: not awaitable.
+    assert c.isawaitable(42) is False
+    assert c.isawaitable("hi") is False
+
+
+def test_iscoroutinefunction_handles_none():
+    """``getattr(tool, 'execute_streaming', None)`` returns ``None``
+    when the attribute is missing — ``iscoroutinefunction(None)``
+    must safely return False rather than crashing."""
+    assert c.iscoroutinefunction(None) is False
+
+
+def test_decode_utf8_lossy_handles_truncated_codepoint():
+    """Truncated multi-byte UTF-8 at the tail (``e2 98`` is the
+    start of the 3-byte ★ codepoint without its third byte) →
+    return the prefix that DOES decode cleanly. CPython does this
+    via ``errors='ignore'``; MP can't pass that kwarg, so the
+    helper trims trailing bytes one at a time until a valid
+    decode."""
+    # ``hello\xe2\x98`` — valid prefix + truncated codepoint.
+    truncated = b"hello\xe2\x98"
+    out = c.decode_utf8_lossy(truncated)
+    assert out == "hello"
+
+
+def test_decode_utf8_lossy_handles_clean_input():
+    """Round-trip a clean UTF-8 byte string."""
+    assert c.decode_utf8_lossy("héllo".encode("utf-8")) == "héllo"
+
+
+def test_decode_utf8_lossy_handles_corrupt_input():
+    """Bytes that fail decode at all four trim levels fall back
+    to ASCII-with-question-mark. Pathological input — exoclaw's
+    streaming-tool path won't actually produce this."""
+    # Four high-bytes in a row never form a valid UTF-8 codepoint
+    # tail — the four-trim window can't recover.
+    out = c.decode_utf8_lossy(b"\x80\x80\x80\x80")
+    # Either clean ASCII fallback or empty — both prove no crash.
+    assert isinstance(out, str)
+
+
+def test_stub_logger_falls_back_on_unencodable_field():
+    """The stub logger's ``json.dumps`` wraps in try/except and
+    falls back to ``[level] event`` on any exception (e.g. an
+    unencodable field). Verifies the fallback path runs without
+    crashing."""
+    log = c._StubLogger("upy-fallback")
+    # An ``object()`` instance isn't JSON-serializable — forces the
+    # fallback path. We don't capture stdout on MP (no
+    # ``contextlib.redirect_stdout``); just verify no exception.
+    log.info("err", bad=object())
+
+
 def test_stub_logger_emits_json():
     """Verify the stub logger doesn't crash on any of the level
     methods. (Output capture isn't trivial without

@@ -664,6 +664,161 @@ def test_on_max_iterations_callback_fires():
     asyncio.run(_go())
 
 
+def test_streaming_tool_attaches_content_file_to_tool_message():
+    """When a streaming tool returns a file-backed result, the
+    agent loop attaches the path to the assistant-visible tool
+    message under the ``_content_file`` transport key. Providers
+    use this to stream from disk into the LLM request body.
+
+    Mirrors the memory-model.md Step D contract end-to-end on MP."""
+    from exoclaw.providers.types import ToolCallRequest
+
+    class _Streaming:
+        name = "stream"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            return ""
+
+        async def execute_streaming(self, **kw):
+            yield "x" * 200
+            yield "y" * 200
+
+    provider = _StubProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest(id="c", name="stream", arguments={})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+    bus = MessageBus()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        conversation=_MemConv(),
+        tools=[_Streaming()],
+    )
+
+    async def _go():
+        _content, msgs = await loop.process_turn("s", "go")
+        # The tool message carries ``_content_file`` pointing at the scratch path.
+        tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+        assert tool_msgs
+        # The transport key is set with the str path. (CPython uses ``str``
+        # on a Path object; MP just propagates the string.)
+        path = tool_msgs[0].get("_content_file")
+        assert path is not None
+        assert isinstance(path, str)
+        # Cleanup the scratch file.
+        import os as _os
+
+        try:
+            _os.remove(path)
+        except OSError:
+            pass
+
+    asyncio.run(_go())
+
+
+def test_on_tool_result_callback_fires_after_each_tool():
+    """``on_tool_result`` is invoked with ``(tool_call, result)``
+    after each tool finishes — used by streaming UIs to surface
+    intermediate state to the user."""
+    from exoclaw.providers.types import ToolCallRequest
+
+    seen = []
+
+    async def _on_tool_result(tool_call, result):
+        seen.append((tool_call.name, result))
+
+    class _Echo:
+        name = "echo"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            return "echoed"
+
+    provider = _StubProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest(id="c", name="echo", arguments={})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+    bus = MessageBus()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        conversation=_MemConv(),
+        tools=[_Echo()],
+        on_tool_result=_on_tool_result,
+    )
+
+    async def _go():
+        await loop.process_turn("s", "go")
+        assert seen == [("echo", "echoed")]
+
+    asyncio.run(_go())
+
+
+def test_reasoning_and_thinking_blocks_with_tool_calls():
+    """When the LLM returns BOTH tool calls AND reasoning / thinking
+    fields, the loop attaches them to the assistant message that
+    accompanies the tool calls. Covers the
+    ``msg["reasoning_content"] = ...`` and
+    ``msg["thinking_blocks"] = ...`` branches in the tool-call
+    iteration (different code path from the final-answer branch)."""
+    from exoclaw.providers.types import ToolCallRequest
+
+    class _Echo:
+        name = "echo"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            return "ok"
+
+    thinking_blocks = [{"type": "thinking", "text": "deciding to call echo"}]
+    provider = _StubProvider(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest(id="c", name="echo", arguments={})],
+                finish_reason="tool_calls",
+                reasoning_content="step 1: call echo",
+                thinking_blocks=thinking_blocks,
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+    bus = MessageBus()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        conversation=_MemConv(),
+        tools=[_Echo()],
+    )
+
+    async def _go():
+        _content, msgs = await loop.process_turn("s", "go")
+        # Find the assistant message that carries the tool call.
+        asst_with_tools = [m for m in msgs if m.get("role") == "assistant" and m.get("tool_calls")]
+        assert asst_with_tools
+        m = asst_with_tools[0]
+        assert m.get("reasoning_content") == "step 1: call echo"
+        assert m.get("thinking_blocks") == thinking_blocks
+
+    asyncio.run(_go())
+
+
 def test_thinking_blocks_attached_to_assistant_message():
     """A provider response with ``thinking_blocks`` (anthropic-style
     extended thinking) propagates to the persisted assistant message

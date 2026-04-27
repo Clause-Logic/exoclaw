@@ -72,23 +72,23 @@ class JSONSchema(TypedDict):
     """Structured Outputs configuration options, including a JSON Schema."""
 
     name: Required[str]  # pragma: no cover (micropython)
-    """Must be a-z, A-Z, 0-9, underscores and dashes, max 64 chars."""
+    """Must be a-z, A-Z, 0-9, underscores and dashes, max 64 chars."""  # pragma: no cover (micropython)
 
     description: str  # pragma: no cover (micropython)
-    """Description of what the response format is for."""
+    """Description of what the response format is for."""  # pragma: no cover (micropython)
 
     schema: dict[str, object]  # pragma: no cover (micropython)
-    """The schema for the response format, as a JSON Schema object."""
+    """The schema for the response format, as a JSON Schema object."""  # pragma: no cover (micropython)
 
     strict: Optional[bool]  # pragma: no cover (micropython)
-    """Whether to enable strict schema adherence."""
+    """Whether to enable strict schema adherence."""  # pragma: no cover (micropython)
 
 
 class ResponseFormatJSONSchema(TypedDict):
     """JSON Schema response format for structured outputs."""
 
     json_schema: Required[JSONSchema]  # pragma: no cover (micropython)
-    """Structured Outputs configuration options, including a JSON Schema."""
+    """Structured Outputs configuration options, including a JSON Schema."""  # pragma: no cover (micropython)
 
     type: Required[str]  # Literal["json_schema"] # pragma: no cover (micropython)
 

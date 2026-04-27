@@ -426,3 +426,54 @@ def test_unbind_log_contextvars_without_bag():
     hasn't been bound yet."""
     # Fresh task storage (or at least no log-ctx bag for *this* var).
     c.unbind_log_contextvars("never_bound_key")
+
+
+# ── aiter_compat coverage ───────────────────────────────────────
+
+
+def test_aiter_compat_wraps_sync_generator():
+    """``async def f(): yield`` on MP is a sync generator;
+    ``aiter_compat`` exposes it as ``async for``-iterable."""
+    import asyncio as _asyncio
+
+    async def _agen():
+        yield 1
+        yield 2
+        yield 3
+
+    out = []
+
+    async def _drive():
+        async for x in c.aiter_compat(_agen()):
+            out.append(x)
+
+    _asyncio.run(_drive())
+    assert out == [1, 2, 3]
+
+
+def test_aiter_compat_wraps_class_async_iterator():
+    """A class implementing ``__aiter__`` / ``__anext__`` is left
+    untouched — ``aiter_compat`` just delegates."""
+    import asyncio as _asyncio
+
+    class _ClassIter:
+        def __init__(self):
+            self._i = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._i >= 2:
+                raise StopAsyncIteration
+            self._i += 1
+            return self._i * 10
+
+    out = []
+
+    async def _drive():
+        async for x in c.aiter_compat(_ClassIter()):
+            out.append(x)
+
+    _asyncio.run(_drive())
+    assert out == [10, 20]

@@ -986,6 +986,50 @@ def which(binary: str) -> str | None:
     return shutil.which(binary)  # pragma: no cover (micropython)
 
 
+class aiter_compat:  # noqa: N801  — lower-case mirrors stdlib ``aiter``
+    """Wrap a generator so ``async for`` works on both runtimes.
+
+    CPython compiles ``async def f(): yield`` into an async
+    generator with ``__aiter__`` / ``__anext__``. MicroPython 1.27
+    compiles the same construct into a plain generator that has
+    neither. Iterating the latter with ``async for`` raises
+    ``AttributeError: 'generator' object has no attribute
+    '__aiter__'`` on MP.
+
+    ``aiter_compat(gen)`` adapts either shape:
+
+    .. code-block:: python
+
+        async for chunk in aiter_compat(_my_streaming_gen()):
+            ...
+
+    No-op overhead on CPython (passes through async ``__anext__``);
+    on MicroPython, translates ``StopIteration`` from the
+    underlying sync generator into ``StopAsyncIteration`` so the
+    caller's ``async for`` exits cleanly."""
+
+    __slots__ = ("_iter", "_is_async")
+
+    def __init__(self, gen: Any) -> None:
+        if hasattr(gen, "__aiter__"):
+            self._iter = gen.__aiter__()
+            self._is_async = True
+        else:
+            self._iter = iter(gen)
+            self._is_async = False
+
+    def __aiter__(self) -> "aiter_compat":
+        return self
+
+    async def __anext__(self) -> Any:
+        if self._is_async:
+            return await self._iter.__anext__()
+        try:
+            return next(self._iter)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
 def is_executable(path: object) -> bool:
     """Check if ``path`` is executable. ``os.access(path, os.X_OK)``
     on CPython, always ``False`` on MicroPython (no subprocesses)."""
@@ -999,6 +1043,7 @@ __all__ = [
     "Path",
     "TaskLocal",
     "WeakValueDictionary",
+    "aiter_compat",
     "bind_log_contextvars",
     "decode_utf8_lossy",
     "get_log_contextvars",

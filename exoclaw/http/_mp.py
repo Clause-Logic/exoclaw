@@ -496,9 +496,7 @@ class MPStreamCM:
                     break
                 if not chunk:
                     continue
-                writer.write(
-                    "{:x}\r\n".format(len(chunk)).encode("ascii") + bytes(chunk) + b"\r\n"
-                )
+                writer.write("{:x}\r\n".format(len(chunk)).encode("ascii") + bytes(chunk) + b"\r\n")
                 if drain is not None:
                     if _expired(deadline_ms):
                         raise HTTPWriteTimeout("body write deadline exceeded")
@@ -507,9 +505,7 @@ class MPStreamCM:
             for chunk in content:
                 if not chunk:
                     continue
-                writer.write(
-                    "{:x}\r\n".format(len(chunk)).encode("ascii") + bytes(chunk) + b"\r\n"
-                )
+                writer.write("{:x}\r\n".format(len(chunk)).encode("ascii") + bytes(chunk) + b"\r\n")
                 if drain is not None:
                     if _expired(deadline_ms):
                         raise HTTPWriteTimeout("body write deadline exceeded")

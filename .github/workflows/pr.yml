@@ -39,7 +39,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: micropython-build/ports/unix/build-coverage/micropython
-          key: micropython-coverage-2026-04-v1
+          # Bump the version suffix when changing the build inputs
+          # (manifest patch, MP version pin, build flags). Stale
+          # caches from the pre-asyncio-patch era will silently miss
+          # ``import asyncio`` at runtime.
+          key: micropython-coverage-2026-04-v2-asyncio
       - name: Install build deps
         if: steps.micropython-cache.outputs.cache-hit != 'true'
         run: |
@@ -48,12 +52,29 @@ jobs:
       - name: Clone MicroPython
         if: steps.micropython-cache.outputs.cache-hit != 'true'
         run: git clone --depth 1 https://github.com/micropython/micropython micropython-build
+      - name: Patch coverage variant manifest to freeze in asyncio
+        if: steps.micropython-cache.outputs.cache-hit != 'true'
+        # The unix port's ``standard`` variant freezes in
+        # ``extmod/asyncio``; ``coverage`` does not. exoclaw's MP
+        # test rig + the agent loop both ``import asyncio`` so we
+        # need it available without a runtime ``mip install``.
+        # ``grep -q`` keeps the patch idempotent if the upstream
+        # manifest ever changes to include asyncio on its own.
+        run: |
+          MANIFEST=micropython-build/ports/unix/variants/coverage/manifest.py
+          if ! grep -q 'extmod/asyncio' "$MANIFEST"; then
+              echo 'include("$(MPY_DIR)/extmod/asyncio")' >> "$MANIFEST"
+          fi
       - name: Build coverage variant
         if: steps.micropython-cache.outputs.cache-hit != 'true'
         working-directory: micropython-build/ports/unix
         run: |
           make submodules
           make VARIANT=coverage -j$(nproc)
+      - name: Verify asyncio is importable
+        run: |
+          BIN="$GITHUB_WORKSPACE/micropython-build/ports/unix/build-coverage/micropython"
+          "$BIN" -c "import asyncio; print('asyncio OK:', asyncio.__name__)"
       - name: Verify settrace support
         run: |
           BIN="$GITHUB_WORKSPACE/micropython-build/ports/unix/build-coverage/micropython"

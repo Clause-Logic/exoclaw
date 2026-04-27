@@ -2,11 +2,15 @@
 uv = "latest"
 
 [tasks.lint]
-description = "Type check with ty and lint with ruff"
+description = "Type check with ty, lint with ruff, check formatting"
 sources = ["exoclaw/**/*.py", "tests/**/*.py", "pyproject.toml"]
 run = [
     "uv run ty check exoclaw",
     "uv run ruff check exoclaw tests",
+    # Format check is part of CI's ``cpython`` matrix entry
+    # (separate ``mise run check-format`` step). Including it
+    # here so ``mise run lint`` matches what CI runs.
+    "uv run ruff format --check exoclaw tests",
 ]
 
 [tasks.format]

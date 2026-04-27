@@ -25,3 +25,4 @@ scripts/upstream_data.json
 scripts/upstream_prs_cache.json
 
 mise.local.toml
+.mp-stage/

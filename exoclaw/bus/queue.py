@@ -1,8 +1,8 @@
 """Async message queue for decoupled channel-agent communication."""
 
-import asyncio
-from collections.abc import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
+from exoclaw._compat import make_async_queue
 from exoclaw.bus.events import InboundMessage, OutboundMessage
 
 
@@ -22,8 +22,13 @@ class MessageBus:
     """
 
     def __init__(self) -> None:
-        self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
-        self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+        # ``make_async_queue`` returns ``asyncio.Queue`` on CPython,
+        # the ``_AsyncQueue`` shim on MicroPython (uasyncio doesn't
+        # ship ``Queue``). Same ``put`` / ``get`` surface either way.
+        # ``Any`` type because the shape differs by runtime — exoclaw
+        # treats both as opaque queue-likes.
+        self.inbound: Any = make_async_queue()
+        self.outbound: Any = make_async_queue()
         self._inbound_hook: Callable[[InboundMessage], Awaitable[None]] | None = None
 
     def set_inbound_hook(self, handler: Callable[[InboundMessage], Awaitable[None]] | None) -> None:

@@ -7,48 +7,69 @@ retry strategies, or execution environments).
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 import os
-import secrets
-import tempfile
-import threading
 import time
-from collections.abc import Awaitable, Callable
-from contextvars import ContextVar
-from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeGuard, runtime_checkable
+from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, TypeGuard, runtime_checkable
 
+from exoclaw._compat import (
+    IS_MICROPYTHON,
+    TaskLocal,
+    decode_utf8_lossy,
+    iscoroutinefunction,
+    make_lock,
+    make_scratch_path,
+    open_text_writer,
+    path_basename,
+    random_bytes,
+)
 from exoclaw.agent.conversation import AppendableConversation, Conversation
 from exoclaw.agent.tools.protocol import ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import LLMResponse
 
+if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+    from dataclasses import dataclass
 
-@dataclass
-class ToolResult:
-    """Result of a tool invocation, possibly file-backed.
+    @dataclass
+    class ToolResult:
+        """Result of a tool invocation, possibly file-backed.
 
-    Carries either the inline string result or a path to a scratch
-    file that holds the full output. Tools that implement the
-    ``execute_streaming`` opt-in capability (memory-model.md Step D)
-    drain into a scratch file as chunks arrive — the executor
-    returns ``ToolResult(content=<short preview>, content_file=<path>)``
-    and the agent loop attaches the path to the tool message so a
-    file-backed provider can stream the full content into the LLM
-    request body without ever materialising it as one Python string.
+        Carries either the inline string result or a path to a
+        scratch file that holds the full output. Tools that implement
+        the ``execute_streaming`` opt-in capability (memory-model.md
+        Step D) drain into a scratch file as chunks arrive — the
+        executor returns ``ToolResult(content=<short preview>,
+        content_file=<path>)`` and the agent loop attaches the path
+        to the tool message so a file-backed provider can stream the
+        full content into the LLM request body without ever
+        materialising it as one Python string.
 
-    Tools without the streaming capability return
-    ``ToolResult(content=<full result>, content_file=None)`` — the
-    legacy inline path. ``content`` is always populated (with a
-    preview when ``content_file`` is set) so callers that don't look
-    at ``content_file`` still see something diagnostic.
-    """
+        Tools without the streaming capability return
+        ``ToolResult(content=<full result>, content_file=None)`` —
+        the legacy inline path. ``content`` is always populated
+        (with a preview when ``content_file`` is set) so callers
+        that don't look at ``content_file`` still see something
+        diagnostic.
 
-    content: str
-    content_file: Path | None = None
+        Real ``@dataclass`` on CPython so downstream serializers
+        (``dataclasses.asdict`` in DBOS / nanobot journals) keep
+        working unchanged.
+        """
+
+        content: str
+        content_file: str | None = None
+
+else:  # pragma: no cover (cpython)
+
+    class ToolResult:
+        """MicroPython fallback — plain class, see CPython branch
+        for the contract. MP strips ``name: type`` annotations at
+        compile time so we hand-write ``__init__``."""
+
+        def __init__(self, content: str, content_file: str | None = None) -> None:
+            self.content = content
+            self.content_file = content_file
 
 
 if TYPE_CHECKING:
@@ -62,7 +83,18 @@ if TYPE_CHECKING:
 # immutable list; a disk-backed implementation re-reads a JSONL file
 # each call so the list is transient rather than heap-resident for the
 # whole turn. See ``docs/memory-model.md`` phase 2b.
-PriorSource = Callable[[], list[dict[str, object]]]
+#
+# ``Callable[..., list[dict[...]]]`` is a runtime subscription
+# (type alias, not annotation) — MicroPython 1.27 doesn't support
+# ``list[X]`` / ``dict[X, Y]`` parameterization at runtime, only in
+# annotations (which ``__future__.annotations`` makes strings). Gate
+# the real alias on ``TYPE_CHECKING`` so type checkers see it; at
+# runtime ``PriorSource`` is just ``object`` and stringified
+# annotations resolve via the type-checker side.
+if TYPE_CHECKING:
+    PriorSource = Callable[[], list[dict[str, object]]]
+else:
+    PriorSource = object
 
 
 def _empty_prior_source() -> list[dict[str, object]]:
@@ -140,7 +172,10 @@ def _build_lazy_prior_source(
     suffix = list(full[last_idx + 1 :])
 
     def _source() -> list[dict[str, object]]:
-        return [*prefix, *reload_history(), *suffix]
+        # ``[*a, *b, *c]`` list-literal unpacking isn't supported on
+        # MicroPython 1.27 — concatenate explicitly. ``reload_history``
+        # returns a list, so ``+`` works on both runtimes.
+        return prefix + reload_history() + suffix
 
     return _source
 
@@ -150,22 +185,41 @@ def _supports_append(conversation: Conversation) -> TypeGuard[AppendableConversa
     coroutine. Narrows the static type to ``AppendableConversation`` so
     callers can reach the opt-in methods without a cast.
 
-    ``asyncio.iscoroutinefunction`` rather than ``hasattr`` — a
-    ``MagicMock`` stand-in has every attribute, and we don't want the
-    many tests that patch Conversation with a plain Mock to
-    accidentally activate the per-message path and then crash on an
-    ``await`` of a non-coroutine.
+    ``iscoroutinefunction`` rather than ``hasattr`` — a ``MagicMock``
+    stand-in has every attribute, and we don't want the many tests
+    that patch Conversation with a plain Mock to accidentally
+    activate the per-message path and then crash on an ``await`` of
+    a non-coroutine.
+
+    Tries the **class** attribute first, then falls back to the
+    instance attribute. The two-step lookup handles both runtimes:
+
+    - MicroPython: bound methods have ``__class__.__name__ ==
+      "bound_method"`` and don't expose ``__func__`` / ``__self__``,
+      so introspecting the bound method returns False even when the
+      underlying ``async def`` is what we want. ``type(conv).append``
+      returns the unbound function whose class IS ``generator`` for
+      ``async def`` — caught by the class-attribute path.
+    - CPython with ``MagicMock(spec=...)``: ``type(mock).append`` is
+      None (MagicMock doesn't put spec attrs on the type, only the
+      instance), and the test sets ``mock.append = AsyncMock(...)``
+      on the instance. Falls through to the instance attribute, which
+      ``inspect.iscoroutinefunction`` correctly recognises as async.
     """
-    fn = getattr(conversation, "append", None)
-    return asyncio.iscoroutinefunction(fn)
+    fn = getattr(type(conversation), "append", None)
+    if fn is None:
+        fn = getattr(conversation, "append", None)
+    return iscoroutinefunction(fn)
 
 
 def _supports_post_turn(conversation: Conversation) -> TypeGuard[AppendableConversation]:
-    fn = getattr(conversation, "post_turn", None)
-    return asyncio.iscoroutinefunction(fn)
+    fn = getattr(type(conversation), "post_turn", None)
+    if fn is None:
+        fn = getattr(conversation, "post_turn", None)
+    return iscoroutinefunction(fn)
 
 
-_uuid7_lock = threading.Lock()
+_uuid7_lock = make_lock()
 _uuid7_last_ms = 0
 
 
@@ -192,7 +246,7 @@ def _uuid7() -> str:
         ts_ms = now_ms if now_ms > _uuid7_last_ms else _uuid7_last_ms
         _uuid7_last_ms = ts_ms
 
-    rand = secrets.token_bytes(10)
+    rand = random_bytes(10)
     b = bytearray(16)
     b[0] = (ts_ms >> 40) & 0xFF
     b[1] = (ts_ms >> 32) & 0xFF
@@ -219,7 +273,7 @@ class Executor(Protocol):
     # appropriate place to perform the send than the outer agent loop —
     # the core doesn't care why. When False, ``_process_message`` builds
     # the ``OutboundMessage`` and the caller handles the send.
-    handles_response_send: bool
+    handles_response_send: bool  # pragma: no cover (micropython)
 
     # When True, the executor takes responsibility for persisting each
     # inbound message the moment a channel hands it over — typically by
@@ -234,7 +288,7 @@ class Executor(Protocol):
     #
     # When False (the default), ``publish_inbound`` uses the asyncio
     # queue and ``AgentLoop.run`` drains it, as before.
-    handles_inbound_enqueue: bool
+    handles_inbound_enqueue: bool  # pragma: no cover (micropython)
 
     async def chat(
         self,
@@ -340,7 +394,6 @@ class Executor(Protocol):
     async def run_hook(
         self,
         fn: Callable[..., Awaitable[object]],
-        /,
         *args: object,
         **kwargs: object,
     ) -> object: ...
@@ -457,14 +510,14 @@ class DirectExecutor:
         # install a closure that reads from disk on demand, letting
         # prior not be held between LLM iterations. That's phase 2b
         # of the memory-model doc's plan — see docs/memory-model.md.
-        self._prior_var: ContextVar[PriorSource] = ContextVar(f"exoclaw_executor_prior_{id(self)}")
-        self._delta_var: ContextVar[list[dict[str, object]]] = ContextVar(
+        self._prior_var: TaskLocal[PriorSource] = TaskLocal(f"exoclaw_executor_prior_{id(self)}")
+        self._delta_var: TaskLocal[list[dict[str, object]]] = TaskLocal(
             f"exoclaw_executor_delta_{id(self)}"
         )
         # Per-task list of scratch files written by streaming tool
         # results during this turn. Cleaned up at ``post_turn``.
         # See ``execute_tool_with_handle`` and memory-model.md Step D.
-        self._scratch_paths_var: ContextVar[list[Path]] = ContextVar(
+        self._scratch_paths_var: TaskLocal[list[str]] = TaskLocal(
             f"exoclaw_executor_scratch_{id(self)}"
         )
 
@@ -500,7 +553,9 @@ class DirectExecutor:
         # mutate it in a compaction callback). Must not be a view
         # onto prior + delta that would change under their feet if
         # append_messages runs concurrently.
-        return [*self._get_prior(), *self._get_delta()]
+        # ``+`` rather than ``[*a, *b]`` because PEP 448 list-literal
+        # unpacking isn't supported on MicroPython 1.27.
+        return self._get_prior() + self._get_delta()
 
     def set_messages(self, messages: list[dict[str, object]]) -> None:
         # Called from two places:
@@ -614,37 +669,75 @@ class DirectExecutor:
         tool, validated = resolved
 
         streamer = getattr(tool, "execute_streaming", None)
-        # Strict ``isasyncgenfunction`` check — a real streaming tool
-        # uses ``async def execute_streaming(...): yield ...`` which
-        # produces an async-generator function. Plain Mock auto-attrs
-        # (``MagicMock(spec=...)``-derived auto-attributes, bare
-        # ``Mock`` ``execute_streaming`` slots in tests) match
-        # ``callable()`` but not this stricter test, so they fall
-        # through to the inline path correctly. Tools that wrap an
-        # async iterator behind an ``async def`` (returning the
-        # iterator without yielding directly) need to add ``yield``
-        # somewhere in the body or convert via a small wrapper —
-        # documented on the ``Tool`` protocol.
-        if not inspect.isasyncgenfunction(streamer):
-            # Tool doesn't opt into streaming — inline path.
+        if streamer is None or not callable(streamer):
+            # Tool doesn't expose ``execute_streaming`` — inline path.
             inline = await self.execute_tool(registry, name, params, ctx, tool_call_id=tool_call_id)
             return ToolResult(content=inline, content_file=None)
 
-        # ``tool_call_id`` originates outside the executor (LLM /
-        # provider) and may contain path separators or other unusual
-        # bytes. Sanitize aggressively to ASCII alnum + ``-`` / ``_``
-        # and cap at 64 chars before letting it near a filesystem path.
+        # Per-runtime dispatch.
+        #
+        # CPython: ``inspect.isasyncgenfunction`` is the strict
+        # pre-call discriminator. It rejects ``MagicMock(spec=...)``-
+        # derived auto-attrs (a Mock's ``execute_streaming`` slot is
+        # callable but isn't an async generator function), so test
+        # mocks fall through to the inline path correctly. The
+        # streamer result drains via ``async for``.
+        #
+        # MicroPython: ``async def f(): yield ...`` compiles to a
+        # **plain generator** instance — no ``__aiter__`` /
+        # ``__anext__``, and uasyncio's frozen ``asyncio`` doesn't
+        # implement the async-iterator protocol. The
+        # ``execute_streaming`` Tool-protocol contract is the same
+        # source-level shape on both runtimes (``async def`` +
+        # ``yield``), but on MP we drain via plain ``for``. Tool
+        # authors write the same code; the executor adapts at the
+        # iteration site. This is what makes memory-model.md Step D
+        # active on MP — a fat tool result drains to a scratch file
+        # instead of materialising as one Python string.
+        if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+            import inspect as _inspect
+
+            if not _inspect.isasyncgenfunction(streamer):
+                inline = await self.execute_tool(
+                    registry, name, params, ctx, tool_call_id=tool_call_id
+                )
+                return ToolResult(content=inline, content_file=None)
+        try:
+            streamer_result = streamer(**validated)
+        except TypeError as e:
+            # Cross-runtime safety net for arity / param mismatches —
+            # an ``async def execute_streaming(self, foo): yield ...``
+            # called with kwargs that don't include ``foo`` raises
+            # ``TypeError`` on both runtimes. CPython's pre-call
+            # ``isasyncgenfunction`` doesn't validate the signature,
+            # only the function shape, so this branch is reachable
+            # on both. Surface as the same ``Error: ...`` shape
+            # ``ToolRegistry.execute`` returns on validation failure.
+            return ToolResult(
+                content=f"Error executing {name}: {e}",
+                content_file=None,
+            )
+
+        # Streaming path. ``tool_call_id`` originates outside the
+        # executor (LLM / provider) and may contain path separators
+        # or other unusual bytes. Sanitize aggressively to ASCII
+        # alnum + ``-`` / ``_`` and cap at 64 chars before letting
+        # it near a filesystem path.
         suffix = ""
         if tool_call_id:
-            safe = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in tool_call_id)[:64]
+            # MP's ``str`` doesn't ship ``isalnum``; combine
+            # ``isalpha()`` + ``isdigit()`` for the same result on
+            # both runtimes.
+            safe = "".join(
+                c if c.isalpha() or c.isdigit() or c in {"-", "_"} else "_" for c in tool_call_id
+            )[:64]
             if safe:
                 suffix = f"-{safe}"
 
         # Drain the async iterator into a per-turn scratch file.
         # The file persists until ``post_turn`` cleans it up; the
         # provider reads from it during request-body assembly.
-        fd, path_str = tempfile.mkstemp(prefix="exoclaw-tool-", suffix=f"{suffix}.txt")
-        path = Path(path_str)
+        path = make_scratch_path(prefix="exoclaw-tool-", suffix=f"{suffix}.txt")
         bytes_written = 0
         # Preview budget is enforced **in bytes**, not characters —
         # ``bytes_written`` accounts in bytes, so mixing the two would
@@ -654,26 +747,44 @@ class DirectExecutor:
         preview_chunks: list[bytes] = []
         preview_budget = 256
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            with open_text_writer(path) as fh:
                 # Bind ``self`` (the registry) into the dispatch
                 # ContextVar for the duration of the stream — fan-out
                 # tools that call ``ToolRegistry.current()`` from
                 # inside ``execute_streaming`` need this exactly the
                 # same way the inline ``execute`` path provides it.
                 with registry.bind_dispatch():
-                    async for chunk in streamer(**validated):
-                        if not isinstance(chunk, str):
-                            chunk = str(chunk)
-                        chunk_bytes = chunk.encode("utf-8")
-                        fh.write(chunk)
-                        bytes_written += len(chunk_bytes)
-                        if preview_budget > 0:
-                            take = min(preview_budget, len(chunk_bytes))
-                            preview_chunks.append(chunk_bytes[:take])
-                            preview_budget -= take
+                    if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+                        async for chunk in streamer_result:
+                            if not isinstance(chunk, str):
+                                chunk = str(chunk)
+                            chunk_bytes = chunk.encode("utf-8")
+                            fh.write(chunk)
+                            bytes_written += len(chunk_bytes)
+                            if preview_budget > 0:
+                                take = min(preview_budget, len(chunk_bytes))
+                                preview_chunks.append(chunk_bytes[:take])
+                                preview_budget -= take
+                    else:  # pragma: no cover (cpython)
+                        # On MP, ``async def f(): yield ...`` produces a
+                        # plain generator — sync iteration drains it.
+                        # The Tool-protocol surface (``async def +
+                        # yield``) is the same source-level shape on
+                        # both runtimes; what changes is the executor's
+                        # iteration site.
+                        for chunk in streamer_result:
+                            if not isinstance(chunk, str):
+                                chunk = str(chunk)
+                            chunk_bytes = chunk.encode("utf-8")
+                            fh.write(chunk)
+                            bytes_written += len(chunk_bytes)
+                            if preview_budget > 0:
+                                take = min(preview_budget, len(chunk_bytes))
+                                preview_chunks.append(chunk_bytes[:take])
+                                preview_budget -= take
         except Exception:
             try:
-                path.unlink()
+                os.remove(path)
             except OSError:
                 pass
             raise
@@ -686,13 +797,14 @@ class DirectExecutor:
             self._scratch_paths_var.set(scratch_paths)
         scratch_paths.append(path)
 
-        # Reassemble preview as text. ``errors="ignore"`` covers the
+        # Reassemble preview as text. ``decode_utf8_lossy`` covers the
         # one edge case where the byte budget cut a multi-byte UTF-8
         # codepoint mid-sequence — the resulting partial bytes are
-        # dropped from the preview rather than crashing the encode.
-        preview = b"".join(preview_chunks).decode("utf-8", errors="ignore")
+        # dropped from the preview rather than crashing the decode
+        # (MP's ``bytes.decode`` doesn't accept ``errors="ignore"``).
+        preview = decode_utf8_lossy(b"".join(preview_chunks))
         if bytes_written > len(preview.encode("utf-8")):
-            preview = f"{preview}…\n[streamed {bytes_written} bytes to {path.name}]"
+            preview = f"{preview}…\n[streamed {bytes_written} bytes to {path_basename(path)}]"
         return ToolResult(content=preview, content_file=path)
 
     async def build_prompt(
@@ -732,7 +844,14 @@ class DirectExecutor:
         #     isolated mode dropped it, etc.).
         # See ``docs/memory-model.md`` phase 2b / Step C.
         loader = getattr(conversation, "load_persisted_history", None)
-        if callable(loader) and not asyncio.iscoroutinefunction(loader):
+        # Two-step lookup so MP's class-attribute path catches async
+        # methods (bound methods on MP aren't introspectable) and
+        # CPython's instance-attribute path catches mocks. See
+        # ``_supports_append`` above for the full rationale.
+        loader_fn = getattr(type(conversation), "load_persisted_history", None)
+        if loader_fn is None:
+            loader_fn = loader
+        if callable(loader) and not iscoroutinefunction(loader_fn):
             history_snapshot = loader(session_id)
             source = _build_lazy_prior_source(
                 full=messages,
@@ -776,7 +895,7 @@ class DirectExecutor:
             scratch_paths = []
         for path in scratch_paths:
             try:
-                path.unlink()
+                os.remove(path)
             except OSError:
                 pass
         if scratch_paths:
@@ -800,7 +919,6 @@ class DirectExecutor:
     async def run_hook(
         self,
         fn: Callable[..., Awaitable[object]],
-        /,
         *args: object,
         **kwargs: object,
     ) -> object:

@@ -24,3 +24,56 @@ description = "Run tests with coverage"
 sources = ["exoclaw/**/*.py", "tests/**/*.py", "pyproject.toml"]
 outputs = [".coverage"]
 run = "uv run pytest --cov=exoclaw --cov-fail-under=95 tests/"
+
+# ── MicroPython tasks ───────────────────────────────────────────────
+#
+# Local MP work needs a staged copy of ``exoclaw/`` next to the
+# vendored typing / dataclasses / datetime stubs so ``import exoclaw``
+# resolves the same way on the device. Without staging, MP picks up
+# the system ``typing`` module (or fails to find one) and
+# ``import exoclaw._compat`` blows up before any test runs.
+#
+# ``EXOCLAW_MICROPYTHON_BIN`` points to a ``coverage``-variant
+# MicroPython binary (built from source — brew's bottle lacks
+# ``sys.settrace``). See ``tests/test_micropython_runner.py``'s
+# docstring for the build recipe. The runner test skips cleanly
+# when the binary is missing.
+
+[tasks.mp-stage]
+description = "Stage exoclaw + stubs into .mp-stage for local MP runs"
+sources = ["exoclaw/**/*.py", "tests/_micropython_stubs/*.py"]
+outputs = [".mp-stage/exoclaw/__init__.py"]
+run = """
+rm -rf .mp-stage
+mkdir -p .mp-stage
+cp -r exoclaw .mp-stage/
+cp tests/_micropython_stubs/*.py .mp-stage/
+"""
+
+[tasks.mp-shell]
+description = "Drop into a MicroPython REPL with exoclaw on MICROPYPATH"
+depends = ["mp-stage"]
+run = '''
+if [ -z "$EXOCLAW_MICROPYTHON_BIN" ]; then
+    echo "Set EXOCLAW_MICROPYTHON_BIN to a coverage-variant micropython binary."
+    echo "See tests/test_micropython_runner.py for the build recipe."
+    exit 1
+fi
+MICROPYPATH=".frozen:$PWD/.mp-stage" "$EXOCLAW_MICROPYTHON_BIN"
+'''
+
+[tasks.mp-run]
+description = "Run the MicroPython test runner directly against the staged tree"
+depends = ["mp-stage"]
+run = '''
+if [ -z "$EXOCLAW_MICROPYTHON_BIN" ]; then
+    echo "Set EXOCLAW_MICROPYTHON_BIN to a coverage-variant micropython binary."
+    exit 1
+fi
+MICROPYPATH=".frozen:$PWD/.mp-stage" "$EXOCLAW_MICROPYTHON_BIN" tests/_micropython_runner/run.py --tests-dir tests/micro --cov-dir "$PWD/.mp-stage/exoclaw"
+'''
+
+[tasks.test-micro]
+description = "Run the MicroPython matrix entry (CPython-side wrapper)"
+sources = ["exoclaw/**/*.py", "tests/**/*.py"]
+run = "uv run pytest tests/test_micropython_runner.py -v"

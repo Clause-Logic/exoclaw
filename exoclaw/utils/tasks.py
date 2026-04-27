@@ -15,8 +15,9 @@ DBOS / structlog / per-turn contextvars.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 from typing import Any, Coroutine, TypeVar
+
+from exoclaw._compat import IS_MICROPYTHON
 
 _T = TypeVar("_T")
 
@@ -35,8 +36,35 @@ def create_isolated_task(
     Use this for any background task that should run as a top-level
     unit of work (timer callbacks, background subagents, deferred
     consolidation, etc.).
+
+    On MicroPython, ``uasyncio.create_task`` doesn't accept
+    ``context`` or ``name`` kwargs. We wrap the user's coroutine in
+    a ``finally`` that drops the task's per-task storage entry from
+    ``_compat._task_storage`` — that's how the
+    ``id(asyncio.current_task())``-keyed ``TaskLocal`` storage gets
+    cleaned up. Without this wrapper a long-running process would
+    accumulate a stale dict per finished task.
+
+    Inheritance from the parent's contextvar bindings is NOT
+    something the MP path defends against: there's no contextvars
+    layer to leak, and the per-task storage is freshly empty for
+    the new task.
     """
-    return asyncio.create_task(coro, context=contextvars.Context(), name=name)
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        from exoclaw._compat import _drop_current_task_storage
+
+        async def _wrapped() -> _T:
+            try:
+                return await coro
+            finally:
+                _drop_current_task_storage()
+
+        return asyncio.create_task(_wrapped())
+    import contextvars  # pragma: no cover (micropython)
+
+    return asyncio.create_task(  # pragma: no cover (micropython)
+        coro, context=contextvars.Context(), name=name
+    )
 
 
 __all__ = ["create_isolated_task"]

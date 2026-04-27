@@ -63,14 +63,61 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 # These files legitimately reference the concrete MessageBus
-"exoclaw/app.py" = ["TID251"]          # provides MessageBus as the default impl
 "exoclaw/bus/__init__.py" = ["TID251"] # re-exports it as part of the bus module
 "exoclaw/utils/tasks.py" = ["TID251"]  # this IS the create_task wrapper
 "tests/*" = ["TID251"]                 # tests use the concrete impl directly
+# The compat shim wraps cross-runtime values whose types differ
+# between CPython and MicroPython — ``Any`` is the honest annotation.
+"exoclaw/_compat.py" = ["ANN401"]
+# Logger parameters use ``Any`` because the runtime logger type
+# differs between CPython (``structlog.FilteringBoundLogger``) and
+# MicroPython (``_compat._StubLogger``) — pinning either is wrong
+# on the other runtime, and the compat shim's contract is shape
+# (``info`` / ``warning`` / ``error`` / ``bind``) not type.
+"exoclaw/app.py" = ["ANN401", "TID251"]
+"exoclaw/agent/loop.py" = ["ANN401"]
+"exoclaw/channels/manager.py" = ["ANN401"]
+# MicroPython test stubs are intentionally minimal — they exist
+# to satisfy ``import`` calls during the subprocess test, not to
+# fully model CPython's typing surface. The class- and method-name
+# ignores cover stdlib mirrors that keep their canonical casing
+# (``datetime`` lowercase, ``__init__`` synthesised inside
+# ``_make_init`` for the dataclasses stub).
+"tests/_micropython_stubs/*" = ["ANN", "N801", "N802", "N807"]
+# The MicroPython runner and the test files it executes run on
+# MicroPython 1.27 — ``typing`` is a stub there and full ANN
+# annotations would just import-fail. Keep them pure-Python.
+"tests/_micropython_runner/*" = ["ANN"]
+"tests/micro/*" = ["ANN"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# ``tests/micro/`` and ``tests/_micropython_runner/`` only run on
+# MicroPython (driven by ``tests/test_micropython_runner.py`` via
+# subprocess). The stubs are vendored ``__future__`` / ``typing``
+# replacements that would conflict if imported on CPython.
+addopts = "--ignore=tests/micro --ignore=tests/_micropython_runner --ignore=tests/_micropython_stubs"
+
+[tool.coverage.run]
+omit = ["tests/micro/*", "tests/_micropython_runner/*"]
+
+[tool.coverage.report]
+# Per-runtime exclusion. The negative-lookahead matches
+# ``pragma: no cover`` only when NOT followed by ``(micropython)``
+# — bare and ``(cpython)``-tagged exclude here, ``(micropython)``
+# stays in scope (CPython CAN reach those lines).
+#
+# Mirror policy in
+# ``tests/test_micropython_runner.py::_executable_lines_for``.
+exclude_lines = [
+    "pragma:\\s*no\\s*cover(?!\\s*\\(micropython\\))",
+    # Protocol method bodies — bare ``...`` on its own line is the
+    # standard idiom for unreachable abstract bodies (Protocol /
+    # @abstractmethod). The MicroPython runner mirrors this exclusion
+    # in ``tests/test_micropython_runner.py::_executable_lines_for``.
+    "^\\s*\\.\\.\\.\\s*$",
+]
 
 [dependency-groups]
 dev = [

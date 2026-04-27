@@ -2,35 +2,62 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 if TYPE_CHECKING:
     from exoclaw.executor import Executor
 
 
-@dataclass
-class ToolContext:
-    """
-    Session context passed to tools that implement execute_with_context().
+from exoclaw._compat import IS_MICROPYTHON
 
-    Duck-typed — tools that need session routing implement:
+if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+    from dataclasses import dataclass, field
 
-        async def execute_with_context(self, ctx: ToolContext, **kwargs: object) -> str:
-            ...
+    @dataclass
+    class ToolContext:
+        """
+        Session context passed to tools that implement execute_with_context().
 
-    Tools that don't need it keep execute(**kwargs) and the registry handles both.
+        Duck-typed — tools that need session routing implement:
 
-    The optional ``executor`` field gives tools access to the environment's
-    durable execution layer (DBOS, Temporal, etc.). Tools that want durable
-    I/O (e.g. LLM calls with automatic retries and checkpointing) can use
-    ``ctx.executor.chat(...)`` instead of calling the provider directly.
-    """
+            async def execute_with_context(self, ctx: ToolContext, **kwargs: object) -> str:
+                ...
 
-    session_key: str
-    channel: str
-    chat_id: str
-    executor: Executor | None = field(default=None, repr=False)
+        Tools that don't need it keep execute(**kwargs) and the registry handles both.
+
+        The optional ``executor`` field gives tools access to the environment's
+        durable execution layer (DBOS, Temporal, etc.). Tools that want durable
+        I/O (e.g. LLM calls with automatic retries and checkpointing) can use
+        ``ctx.executor.chat(...)`` instead of calling the provider directly.
+
+        Real ``@dataclass`` on CPython so downstream callers using
+        ``dataclasses.asdict`` / ``fields`` for journaling keep
+        working unchanged.
+        """
+
+        session_key: str
+        channel: str
+        chat_id: str
+        executor: "Executor | None" = field(default=None, repr=False)
+
+else:  # pragma: no cover (cpython)
+
+    class ToolContext:
+        """MicroPython fallback — plain class, see CPython branch
+        for the contract. MP strips ``name: type`` annotations at
+        compile time so we hand-write ``__init__``."""
+
+        def __init__(
+            self,
+            session_key: str,
+            channel: str,
+            chat_id: str,
+            executor: "Executor | None" = None,
+        ) -> None:
+            self.session_key = session_key
+            self.channel = channel
+            self.chat_id = chat_id
+            self.executor = executor
 
 
 @runtime_checkable
@@ -112,18 +139,18 @@ class ToolBase:
     def _cast_object(self, obj: object, schema: dict[str, object]) -> dict[str, object]:
         """Cast an object (dict) according to schema."""
         if not isinstance(obj, dict):
-            return cast(dict[str, object], obj)
-        obj_dict = cast(dict[str, object], obj)
+            return cast("dict[str, object]", obj)
+        obj_dict = cast("dict[str, object]", obj)
         props = schema.get("properties", {})
         result: dict[str, object] = {}
         if not isinstance(props, dict):
             return dict(obj_dict)
-        props_dict = cast(dict[str, object], props)
+        props_dict = cast("dict[str, object]", props)
         for key, value in obj_dict.items():
             if key in props_dict:
                 prop_schema = props_dict[key]
                 if isinstance(prop_schema, dict):
-                    result[key] = self._cast_value(value, cast(dict[str, object], prop_schema))
+                    result[key] = self._cast_value(value, cast("dict[str, object]", prop_schema))
                 else:
                     result[key] = value
             else:
@@ -177,7 +204,7 @@ class ToolBase:
             item_schema = schema.get("items")
             if isinstance(item_schema, dict):
                 return [
-                    self._cast_value(item, cast(dict[str, object], item_schema)) for item in val
+                    self._cast_value(item, cast("dict[str, object]", item_schema)) for item in val
                 ]
             return val
 
@@ -193,7 +220,12 @@ class ToolBase:
         schema = self.parameters or {}  # type: ignore[attr-defined]
         if schema.get("type", "object") != "object":
             raise ValueError(f"Schema must be object type, got {schema.get('type')!r}")
-        return self._validate(params, {**schema, "type": "object"}, "")
+        # PEP 448 dict-literal unpacking (``{**schema, ...}``) isn't
+        # supported on MicroPython 1.27 — build via copy + setitem to
+        # work on both runtimes.
+        schema_with_type = dict(schema)
+        schema_with_type["type"] = "object"
+        return self._validate(params, schema_with_type, "")
 
     def _validate(self, val: object, schema: dict[str, object], path: str) -> list[str]:
         t, label = schema.get("type"), path or "parameter"
@@ -229,16 +261,16 @@ class ToolBase:
             if max_length is not None and isinstance(max_length, int) and len(val) > max_length:
                 errors.append(f"{label} must be at most {max_length} chars")
         if t == "object" and isinstance(val, dict):
-            val_dict = cast(dict[str, object], val)
+            val_dict = cast("dict[str, object]", val)
             props = schema.get("properties", {})
             required = schema.get("required", [])
             if isinstance(required, list):
-                required_list = cast(list[str], required)
+                required_list = cast("list[str]", required)
                 for k in required_list:
                     if k not in val_dict:
                         errors.append(f"missing required {path + '.' + k if path else k}")
             if isinstance(props, dict):
-                props_dict = cast(dict[str, object], props)
+                props_dict = cast("dict[str, object]", props)
                 for k, v in val_dict.items():
                     if k in props_dict:
                         prop_schema = props_dict[k]
@@ -246,7 +278,7 @@ class ToolBase:
                             errors.extend(
                                 self._validate(
                                     v,
-                                    cast(dict[str, object], prop_schema),
+                                    cast("dict[str, object]", prop_schema),
                                     path + "." + k if path else k,
                                 )
                             )
@@ -257,7 +289,7 @@ class ToolBase:
                     errors.extend(
                         self._validate(
                             item,
-                            cast(dict[str, object], item_schema),
+                            cast("dict[str, object]", item_schema),
                             f"{path}[{i}]" if path else f"[{i}]",
                         )
                     )

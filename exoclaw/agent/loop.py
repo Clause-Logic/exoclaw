@@ -5,14 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
-from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Any, Awaitable, Callable, Coroutine, cast
 
-import structlog
-import structlog.contextvars
-from structlog.typing import FilteringBoundLogger
-
+from exoclaw._compat import (
+    bind_log_contextvars,
+    get_log_contextvars,
+    get_logger,
+    monotonic_diff_ms,
+    monotonic_ms,
+    unbind_log_contextvars,
+)
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import Tool, ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
@@ -70,7 +72,7 @@ class AgentLoop:
         | None = None,
         iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
-        logger: FilteringBoundLogger | None = None,
+        logger: Any | None = None,
     ) -> None:
         self.bus = bus
         self._executor: Executor = executor or DirectExecutor()
@@ -99,7 +101,7 @@ class AgentLoop:
                 tool.set_bus(self.bus)  # type: ignore[call-non-callable]
             if hasattr(tool, "set_registry"):
                 tool.set_registry(self.tools)  # type: ignore[call-non-callable]
-        self._log: FilteringBoundLogger = logger or structlog.get_logger()
+        self._log: Any = logger or get_logger()
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task[None]]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
@@ -361,7 +363,7 @@ class AgentLoop:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                            "arguments": json.dumps(tc.arguments),
                         },
                     }
                     for tc in response.tool_calls
@@ -378,7 +380,10 @@ class AgentLoop:
 
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
-                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    # ``ensure_ascii`` kwarg dropped: MicroPython 1.27's
+                    # ``json.dumps`` doesn't accept it. The non-ASCII
+                    # cost is just longer ``\uXXXX``-escaped output.
+                    args_str = json.dumps(tool_call.arguments)
                     # `tool_call` + `tool_result` form a start/stop pair
                     # correlated by `tool.call_id`. On error, `.exception()`
                     # attaches the traceback via structlog's format_exc_info.
@@ -390,7 +395,7 @@ class AgentLoop:
                         },
                         args=args_str[:200],
                     )
-                    t0 = time.monotonic()
+                    t0 = monotonic_ms()
                     status = "ok"
                     exc: BaseException | None = None
                     result = ""
@@ -438,7 +443,7 @@ class AgentLoop:
                             "\n\n[Analyze the error above and try a different approach.]"
                         )
                     finally:
-                        duration_ms = int((time.monotonic() - t0) * 1000)
+                        duration_ms = monotonic_diff_ms(monotonic_ms(), t0)
                         stop_kwargs: dict[str, object] = {
                             "tool.name": tool_call.name,
                             "tool.call_id": tool_call.id,
@@ -502,8 +507,15 @@ class AgentLoop:
             final_content = await self._build_limit_message(iteration, tools_used)
             if self._on_max_iterations and self._current_ctx:
                 ctx = self._current_ctx
-                asyncio.ensure_future(
-                    self._on_max_iterations(ctx.session_key, ctx.channel, ctx.chat_id)
+                # ``create_isolated_task`` over ``ensure_future`` —
+                # MicroPython's frozen ``asyncio`` doesn't ship
+                # ``ensure_future``. Same fire-and-forget semantics
+                # for the no-await-needed callback case here.
+                create_isolated_task(
+                    cast(
+                        "Coroutine[object, object, None]",
+                        self._on_max_iterations(ctx.session_key, ctx.channel, ctx.chat_id),
+                    )
                 )
 
         return final_content, tools_used, self._executor.load_messages()
@@ -589,7 +601,7 @@ class AgentLoop:
         before calling ``process_direct``) extend the ancestry correctly.
         """
         turn_id = await self._executor.mint_turn_id()
-        ctx = structlog.contextvars.get_contextvars()
+        ctx = get_log_contextvars()
         parent_chain = cast(str, ctx.get("turn.chain", "") or "")
         parent_id = ctx.get("turn.id")
         root_id = ctx.get("turn.root_id") or turn_id
@@ -610,7 +622,7 @@ class AgentLoop:
         _sentinel = object()
         prior_turn_ctx = {k: ctx.get(k, _sentinel) for k in _turn_keys}
 
-        structlog.contextvars.bind_contextvars(
+        bind_log_contextvars(
             **{
                 "turn.id": turn_id,
                 "turn.root_id": root_id,
@@ -619,7 +631,7 @@ class AgentLoop:
                 "turn.chain": chain,
             }
         )
-        turn_start = time.monotonic()
+        turn_start = monotonic_ms()
         self._log.info("turn_start")
         try:
             initial = await self._executor.build_prompt(
@@ -659,14 +671,14 @@ class AgentLoop:
         finally:
             self._log.info(
                 "turn_end",
-                **{"turn.duration_ms": int((time.monotonic() - turn_start) * 1000)},
+                **{"turn.duration_ms": monotonic_diff_ms(monotonic_ms(), turn_start)},
             )
             to_rebind = {k: v for k, v in prior_turn_ctx.items() if v is not _sentinel}
             to_unbind = tuple(k for k, v in prior_turn_ctx.items() if v is _sentinel)
             if to_unbind:
-                structlog.contextvars.unbind_contextvars(*to_unbind)
+                unbind_log_contextvars(*to_unbind)
             if to_rebind:
-                structlog.contextvars.bind_contextvars(**to_rebind)
+                bind_log_contextvars(**to_rebind)
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -683,15 +695,36 @@ class AgentLoop:
                 if msg.content.strip().lower() == "/stop":
                     await self._handle_stop(msg)
                 else:
-                    task = create_isolated_task(self._dispatch(msg))
-                    self._active_tasks.setdefault(msg.session_key, []).append(task)
+                    # ``_remove_task`` runs after dispatch finishes —
+                    # uses CPython's ``add_done_callback`` when
+                    # available (real asyncio.Task) and a finally
+                    # wrapper otherwise (uasyncio Task on
+                    # MicroPython, which doesn't ship the callback
+                    # API). Both paths drain the per-session list
+                    # so it doesn't grow unboundedly.
+                    session_key = msg.session_key
 
-                    def _remove_task(t: asyncio.Task[None], k: str = msg.session_key) -> None:
+                    def _remove_task(t: asyncio.Task[None], k: str = session_key) -> None:
                         tasks = self._active_tasks.get(k, [])
                         if t in tasks:
                             tasks.remove(t)
 
-                    task.add_done_callback(_remove_task)
+                    add_cb = getattr(asyncio.Task, "add_done_callback", None)
+                    if add_cb is not None:  # pragma: no cover (micropython)
+                        task = create_isolated_task(self._dispatch(msg))
+                        task.add_done_callback(_remove_task)
+                    else:  # pragma: no cover (cpython)
+
+                        async def _wrapped(_msg: InboundMessage = msg) -> None:
+                            try:
+                                await self._dispatch(_msg)
+                            finally:
+                                cur = asyncio.current_task()
+                                if cur is not None:
+                                    _remove_task(cast("asyncio.Task[None]", cur))
+
+                        task = create_isolated_task(_wrapped())
+                    self._active_tasks.setdefault(session_key, []).append(task)
         finally:
             all_tasks = [t for ts in self._active_tasks.values() for t in ts if not t.done()]
             for t in all_tasks:
@@ -796,7 +829,7 @@ class AgentLoop:
             # ``_process_turn_inline`` would see an empty context and
             # start a fresh root. Rebinding the four keys here is
             # idempotent and leaves other bindings alone.
-            structlog.contextvars.bind_contextvars(
+            bind_log_contextvars(
                 **{
                     "session.key": sid,
                     "channel": channel,
@@ -835,7 +868,7 @@ class AgentLoop:
         # contextvars is what makes subagent trace ancestry survive
         # from ``SubagentManager._run`` into the child's own
         # ``_process_turn_inline``.
-        structlog.contextvars.bind_contextvars(
+        bind_log_contextvars(
             **{
                 "session.key": sid,
                 "channel": msg.channel,
@@ -917,7 +950,15 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
         if self._on_post_turn and new_msgs:
-            asyncio.ensure_future(self._on_post_turn(new_msgs, sid, msg.channel, msg.chat_id))
+            # ``create_isolated_task`` over ``ensure_future`` —
+            # MicroPython's frozen ``asyncio`` doesn't ship
+            # ``ensure_future``.
+            create_isolated_task(
+                cast(
+                    "Coroutine[object, object, None]",
+                    self._on_post_turn(new_msgs, sid, msg.channel, msg.chat_id),
+                )
+            )
 
         if publish_response and getattr(self._executor, "handles_response_send", False):
             # Executor took ownership of the send — nothing to return.

@@ -13,29 +13,41 @@ so each task sees its own binding. Hand-checking each new tool is
 unreliable; this helper exists so any tool's test suite can call
 ``assert_set_context_isolates_per_task(...)`` and get a
 deterministic regression check.
-"""
 
-from __future__ import annotations
+**MicroPython note:** every line below is excluded from the
+MicroPython coverage scope. ``_compat.TaskLocal`` on MP DOES
+provide real per-task isolation (keyed by
+``id(asyncio.current_task())``), so a tool using ``TaskLocal``
+under cooperative single-task uasyncio gets the correct
+ALPHA-sees-ALPHA / BRAVO-sees-BRAVO behaviour. The reason this
+helper still doesn't run on MP is the test rig's bookkeeping —
+exoclaw plugins run their assertion suites on CPython where
+``contextvars.ContextVar`` is the native primitive. Marked as a
+whole because partial line-level pragmas would just clutter the
+file."""
 
-import asyncio
-import inspect
-from typing import Awaitable, Callable, TypeVar, cast
+from __future__ import annotations  # pragma: no cover (micropython)
 
-_TTool = TypeVar("_TTool")
-_TVal = TypeVar("_TVal")
+import asyncio  # pragma: no cover (micropython)
+from typing import Awaitable, Callable, TypeVar, cast  # pragma: no cover (micropython)
+
+from exoclaw._compat import isawaitable  # pragma: no cover (micropython)
+
+_TTool = TypeVar("_TTool")  # pragma: no cover (micropython)
+_TVal = TypeVar("_TVal")  # pragma: no cover (micropython)
 
 
-async def _maybe_await(value: Awaitable[_TVal] | _TVal) -> _TVal:
+async def _maybe_await(value: Awaitable[_TVal] | _TVal) -> _TVal:  # pragma: no cover (micropython)
     """Await value if it's awaitable, otherwise return as-is.
 
     Uses ``inspect.isawaitable`` so Future / Task / custom awaitables
     are handled, not just bare coroutines."""
-    if inspect.isawaitable(value):
+    if isawaitable(value):
         return await cast("Awaitable[_TVal]", value)
     return cast(_TVal, value)
 
 
-async def assert_set_context_isolates_per_task(
+async def assert_set_context_isolates_per_task(  # pragma: no cover (micropython)
     *,
     make_tool: Callable[[], _TTool],
     set_context: Callable[[_TTool, str], Awaitable[None] | None],
@@ -100,4 +112,4 @@ async def assert_set_context_isolates_per_task(
     )
 
 
-__all__ = ["assert_set_context_isolates_per_task"]
+__all__ = ["assert_set_context_isolates_per_task"]  # pragma: no cover (micropython)

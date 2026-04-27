@@ -17,11 +17,9 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-import structlog
-from structlog.typing import FilteringBoundLogger
-
+from exoclaw._compat import get_logger
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import Tool
 from exoclaw.bus.protocol import Bus
@@ -55,7 +53,7 @@ class Exoclaw:
         reasoning_effort: str | None = None,
         iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
-        logger: FilteringBoundLogger | None = None,
+        logger: Any | None = None,
     ) -> None:
         self.provider = provider
         self.iteration_policy = iteration_policy
@@ -69,7 +67,7 @@ class Exoclaw:
         self.max_tokens = max_tokens
         self.max_iterations = max_iterations
         self.reasoning_effort = reasoning_effort
-        self._log: FilteringBoundLogger = logger or structlog.get_logger()
+        self._log: Any = logger or get_logger()
 
     def _build(self) -> tuple[Bus, AgentLoop, ChannelManager]:
         """Instantiate all internal components. Called once at run time."""

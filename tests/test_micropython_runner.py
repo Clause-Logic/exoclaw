@@ -223,7 +223,18 @@ def _run_micropython_suite(binary: str, tmp_path: Path) -> dict:
     # Copy the full package preserving directory structure. The
     # runner sets ``MICROPYPATH`` to the stage so ``import exoclaw``
     # resolves through this copy.
-    shutil.copytree(_EXOCLAW_PKG, stage / "exoclaw")
+    #
+    # ``_cpython.py`` siblings (e.g. ``http/_cpython.py``) hold
+    # CPython-only implementations gated behind a runtime branch in
+    # the package's ``__init__.py``. MicroPython never imports them,
+    # so staging them only confuses the coverage gate (the runner
+    # would report 0% on bytecode it never reaches). Filter at copy
+    # time.
+    shutil.copytree(
+        _EXOCLAW_PKG,
+        stage / "exoclaw",
+        ignore=shutil.ignore_patterns("_cpython.py", "__pycache__"),
+    )
     # Vendored stubs sit at the stage root so ``import typing`` /
     # ``import dataclasses`` / ``import datetime`` resolve to the
     # stubs before MicroPython's frozen modules. ``.frozen`` stays
@@ -240,6 +251,13 @@ def _run_micropython_suite(binary: str, tmp_path: Path) -> dict:
     result = subprocess.run(
         [
             binary,
+            # Bump the GC heap so the runner can hold all the test
+            # modules' bytecode + the per-test trace tables.
+            # ``test_http.py`` pushes the default 1 MiB heap over the
+            # edge with a 27 KiB code-object allocation that fails
+            # mid-import. 8 MiB matches the ESP32-S3 8 MiB target.
+            "-X",
+            "heapsize=8M",
             str(_RUNNER),
             "--tests-dir",
             str(_MICRO_TESTS_DIR),

@@ -678,7 +678,11 @@ if IS_MICROPYTHON:  # pragma: no cover (cpython)
 
         def __init__(self, *parts: object) -> None:
             if len(parts) == 1 and isinstance(parts[0], Path):
-                self._path = parts[0]._path
+                # ``ty`` sees ``Path`` as a union (this MP class +
+                # ``pathlib.Path`` from the CPython branch) and can't
+                # confirm ``_path`` lives on the union. The runtime
+                # gate guarantees only the MP class is reachable here.
+                self._path = parts[0]._path  # type: ignore[unresolved-attribute]
                 return
             cleaned: list[str] = []
             for i, p in enumerate(parts):
@@ -704,7 +708,9 @@ if IS_MICROPYTHON:  # pragma: no cover (cpython)
 
         def __eq__(self, other: object) -> bool:
             if isinstance(other, Path):
-                return self._path == other._path
+                # See ``__init__`` for why ty needs the override here —
+                # the runtime gate keeps this branch MP-only.
+                return self._path == other._path  # type: ignore[unresolved-attribute]
             return False
 
         def __hash__(self) -> int:

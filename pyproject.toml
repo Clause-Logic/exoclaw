@@ -21,11 +21,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+http = [
+    # ``exoclaw.http.HTTPClient`` uses ``httpx`` on CPython for
+    # connection pooling + battle-tested HTTP parsing. MicroPython
+    # uses a hand-rolled stdlib path, so it doesn't need this dep.
+    "httpx>=0.27.0",
+]
 dev = [
     "pytest>=9.0.0,<10.0.0",
     "pytest-asyncio>=1.3.0,<2.0.0",
     "ruff>=0.1.0",
     "ty>=0.0.1",
+    # ``exoclaw.http`` tests exercise the CPython httpx path.
+    "httpx>=0.27.0",
 ]
 
 [build-system]

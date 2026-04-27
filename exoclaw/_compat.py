@@ -817,9 +817,7 @@ if IS_MICROPYTHON:  # pragma: no cover (cpython)
             # ``pathlib.Path`` rejects.
             ok = self._path == other_s or self._path.startswith(other_s + "/")
             if not ok:
-                raise ValueError(
-                    "{!r} not under {!r}".format(self._path, other_s)
-                )
+                raise ValueError("{!r} not under {!r}".format(self._path, other_s))
             rest = self._path[len(other_s) :].lstrip("/")
             return Path(rest)
 

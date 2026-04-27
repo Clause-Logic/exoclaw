@@ -21,6 +21,7 @@ protocol works identically on both runtimes.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING
 
 from exoclaw.http import (
@@ -36,17 +37,34 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterable
 
 
+def _deadline_ms(timeout_s: float) -> int:
+    return int(time.time() * 1000) + int(timeout_s * 1000)
+
+
+def _expired(deadline_ms: int) -> bool:
+    return int(time.time() * 1000) >= deadline_ms
+
+
 async def _read_until_double_crlf(
-    reader: asyncio.StreamReader, max_bytes: int = 32 * 1024
+    reader: asyncio.StreamReader,
+    deadline_ms: int,
+    max_bytes: int = 32 * 1024,
 ) -> bytes:
     """Read response head (status line + headers) up to ``\\r\\n\\r\\n``.
 
-    ``max_bytes`` caps the head size to avoid runaway reads. 32 KiB
-    is plenty for any realistic response head."""
+    Deadline-checked between reads instead of wrapped in
+    ``asyncio.wait_for``. On MicroPython, ``wait_for(coro_doing_IO,
+    t)`` puts the calling task into ``_task_queue`` (sleeping) while
+    the IO-wrapping inner task registers in ``IOQueue``; combined
+    with SSL streaming reads on the same socket this hits a
+    pairheap-double-push assert in MP's asyncio. Deadline-only
+    bounding keeps the task on exactly one wait queue at a time."""
     buf = b""
     while b"\r\n\r\n" not in buf:
         if len(buf) > max_bytes:
             raise HTTPError("response head exceeded {} bytes".format(max_bytes))
+        if _expired(deadline_ms):
+            raise HTTPReadTimeout("response head deadline exceeded")
         chunk = await reader.read(1024)
         if not chunk:
             raise HTTPError("connection closed before response head complete")
@@ -356,22 +374,29 @@ class MPStreamCM:
         else:
             ssl_arg = None
 
+        # Deadline-only bounding: ``wait_for(io_coro, t)`` on
+        # MicroPython schedules the caller's task on _task_queue
+        # (sleep) while the wrapped IO task registers in IOQueue —
+        # collisions on long SSL streams hit a pairheap assert. We
+        # use a single deadline that covers connect + send + head
+        # read, checked between IO ops, so the task is on exactly
+        # one wait queue at any moment.
+        deadline = _deadline_ms(self._timeout)
         try:
-            connect_coro = asyncio.open_connection(host, port, ssl=ssl_arg)
-            reader, writer = await asyncio.wait_for(connect_coro, timeout=self._timeout)
-        except asyncio.TimeoutError as e:
-            raise HTTPConnectError("connect timeout to {}:{}".format(host, port)) from e
+            reader, writer = await asyncio.open_connection(host, port, ssl=ssl_arg)
         except OSError as e:
             raise HTTPConnectError("connect failed to {}:{}: {}".format(host, port, e)) from e
+        if _expired(deadline):
+            raise HTTPConnectError("connect deadline exceeded for {}:{}".format(host, port))
         self._reader = reader
         self._writer = writer
 
         try:
-            await self._send_request(writer, host, path)
-            head = await asyncio.wait_for(_read_until_double_crlf(reader), timeout=self._timeout)
-        except asyncio.TimeoutError as e:
+            await self._send_request(writer, host, path, deadline)
+            head = await _read_until_double_crlf(reader, deadline)
+        except (HTTPReadTimeout, HTTPWriteTimeout):
             await self._close_writer()
-            raise HTTPReadTimeout("response head timeout") from e
+            raise
         except OSError as e:
             await self._close_writer()
             raise HTTPConnectError("send/recv failed: {}".format(e)) from e
@@ -402,11 +427,18 @@ class MPStreamCM:
             pass
         self._writer = None
 
-    async def _send_request(self, writer: asyncio.StreamWriter, host: str, path: str) -> None:
+    async def _send_request(
+        self, writer: asyncio.StreamWriter, host: str, path: str, deadline_ms: int
+    ) -> None:
         """Build and send the HTTP/1.1 request.
 
         Always uses chunked transfer encoding for the body so the
         same code path serves streaming-iterable and one-shot bytes.
+
+        ``deadline_ms`` bounds total send time. Drains run unwrapped
+        — wrapping with ``asyncio.wait_for`` mixes a sleep into the
+        same task that's also doing IO via ``_io_queue.queue_write``,
+        which on MP races into a pairheap-double-push assert.
         """
         lines = ["POST {} HTTP/1.1".format(path), "Host: {}".format(host)]
         seen = {k.lower() for k in self._headers}
@@ -425,14 +457,9 @@ class MPStreamCM:
         writer.write(head)
         drain = getattr(writer, "drain", None)
         if drain is not None:
-            try:
-                await asyncio.wait_for(drain(), timeout=self._timeout)
-            except asyncio.TimeoutError as e:  # pragma: no cover (micropython)
-                # Only triggered against a real socket whose write
-                # buffer has filled — the in-memory ``_FakeWriter``
-                # the test rig uses returns immediately from
-                # ``drain``.
-                raise HTTPWriteTimeout("header write timeout") from e
+            if _expired(deadline_ms):
+                raise HTTPWriteTimeout("header write deadline exceeded")
+            await drain()
 
         content = self._content
         if content is None:
@@ -460,41 +487,36 @@ class MPStreamCM:
         #     Iterate with sync ``for``; ``await`` inside the
         #     generator body collapses to ``yield from`` so the
         #     scheduler still drives any I/O it does.
-        try:
-            if hasattr(content, "__aiter__") or hasattr(content, "__anext__"):
-                content_iter = content.__aiter__() if hasattr(content, "__aiter__") else content
-                while True:
-                    try:
-                        chunk = await content_iter.__anext__()
-                    except StopAsyncIteration:
-                        break
-                    if not chunk:
-                        continue
-                    writer.write(
-                        "{:x}\r\n".format(len(chunk)).encode("ascii") + bytes(chunk) + b"\r\n"
-                    )
-                    if drain is not None:
-                        try:
-                            await asyncio.wait_for(drain(), timeout=self._timeout)
-                        except asyncio.TimeoutError as e:
-                            raise HTTPWriteTimeout("body write timeout") from e
-            else:
-                for chunk in content:
-                    if not chunk:
-                        continue
-                    writer.write(
-                        "{:x}\r\n".format(len(chunk)).encode("ascii") + bytes(chunk) + b"\r\n"
-                    )
-                    if drain is not None:
-                        try:
-                            await asyncio.wait_for(drain(), timeout=self._timeout)
-                        except asyncio.TimeoutError as e:
-                            raise HTTPWriteTimeout("body write timeout") from e
-            writer.write(b"0\r\n\r\n")
-            if drain is not None:
-                await drain()
-        except asyncio.TimeoutError as e:
-            raise HTTPWriteTimeout("body write timeout") from e
+        if hasattr(content, "__aiter__") or hasattr(content, "__anext__"):
+            content_iter = content.__aiter__() if hasattr(content, "__aiter__") else content
+            while True:
+                try:
+                    chunk = await content_iter.__anext__()
+                except StopAsyncIteration:
+                    break
+                if not chunk:
+                    continue
+                writer.write(
+                    "{:x}\r\n".format(len(chunk)).encode("ascii") + bytes(chunk) + b"\r\n"
+                )
+                if drain is not None:
+                    if _expired(deadline_ms):
+                        raise HTTPWriteTimeout("body write deadline exceeded")
+                    await drain()
+        else:
+            for chunk in content:
+                if not chunk:
+                    continue
+                writer.write(
+                    "{:x}\r\n".format(len(chunk)).encode("ascii") + bytes(chunk) + b"\r\n"
+                )
+                if drain is not None:
+                    if _expired(deadline_ms):
+                        raise HTTPWriteTimeout("body write deadline exceeded")
+                    await drain()
+        writer.write(b"0\r\n\r\n")
+        if drain is not None:
+            await drain()
 
 
 class MPClient:

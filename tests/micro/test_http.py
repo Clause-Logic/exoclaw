@@ -137,7 +137,7 @@ def test_read_until_double_crlf_assembles_across_chunks():
     reader = _FakeReader([b"HTTP/1.1 200 OK\r\n", b"X-A: 1\r\n\r\n", b"body bytes"])
 
     async def _go():
-        return await h_mp._read_until_double_crlf(reader)
+        return await h_mp._read_until_double_crlf(reader, h_mp._deadline_ms(60))
 
     head = asyncio.run(_go())
     assert b"\r\n\r\n" in head
@@ -153,7 +153,7 @@ def test_read_until_double_crlf_raises_on_early_close():
     async def _go():
         nonlocal raised
         try:
-            await h_mp._read_until_double_crlf(reader)
+            await h_mp._read_until_double_crlf(reader, h_mp._deadline_ms(60))
         except h.HTTPError:
             raised = True
 
@@ -327,7 +327,7 @@ def test_send_request_emits_chunked_body_with_iterable_content():
     cm._content = _body()
 
     async def _go():
-        await cm._send_request(writer, "api.example.com", "/v1/x")
+        await cm._send_request(writer, "api.example.com", "/v1/x", h_mp._deadline_ms(60))
 
     asyncio.run(_go())
     sent = writer.written
@@ -357,7 +357,7 @@ def test_send_request_emits_one_shot_bytes_as_single_chunk():
     )
 
     async def _go():
-        await cm._send_request(writer, "x.test", "/y")
+        await cm._send_request(writer, "x.test", "/y", h_mp._deadline_ms(60))
 
     asyncio.run(_go())
     sent = writer.written
@@ -380,7 +380,7 @@ def test_send_request_with_no_content_emits_only_terminator():
     )
 
     async def _go():
-        await cm._send_request(writer, "x.test", "/y")
+        await cm._send_request(writer, "x.test", "/y", h_mp._deadline_ms(60))
 
     asyncio.run(_go())
     sent = writer.written
@@ -494,7 +494,7 @@ def test_read_until_double_crlf_max_bytes_cap():
     reader = _FakeReader([big])
 
     async def _go():
-        return await h_mp._read_until_double_crlf(reader, max_bytes=1024)
+        return await h_mp._read_until_double_crlf(reader, h_mp._deadline_ms(60), max_bytes=1024)
 
     raised = False
     try:
@@ -732,7 +732,7 @@ def test_send_request_iterable_content_uses_aiter_protocol():
     )
 
     async def _go():
-        await cm._send_request(writer, "x.test", "/y")
+        await cm._send_request(writer, "x.test", "/y", h_mp._deadline_ms(60))
 
     asyncio.run(_go())
     sent = writer.written
@@ -754,7 +754,7 @@ def test_send_request_drops_caller_transfer_encoding_override():
     )
 
     async def _go():
-        await cm._send_request(writer, "x.test", "/y")
+        await cm._send_request(writer, "x.test", "/y", h_mp._deadline_ms(60))
 
     asyncio.run(_go())
     sent = writer.written

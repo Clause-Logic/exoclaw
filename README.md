@@ -580,22 +580,60 @@ exoclaw/
 
 exoclaw core runs on **CPython and MicroPython** out of the same source tree. The compat shim in `exoclaw/_compat.py` papers over runtime differences (`ContextVar`, `inspect.iscoroutinefunction`, `secrets.token_bytes`, `tempfile.mkstemp`, `threading.Lock`, `structlog`); call sites import the shim and don't branch on the runtime.
 
-**It's safe to use because CI proves it.** Every PR runs the test suite as a matrix on both runtimes:
-
-- **CPython entry**: `pytest --cov=exoclaw` with a coverage threshold. Lines tagged `# pragma: no cover (cpython)` (the MicroPython-only branches in the shim) are excluded — they aren't reachable here.
-- **MicroPython entry**: a tiny pytest-shim runner (`tests/_micropython_runner/run.py`) executes pure-Python tests under MicroPython's unix port (built with `MICROPY_PY_SYS_SETTRACE=1`), traces line execution via `sys.settrace`, and asserts ≥95% coverage on the lines reachable from MicroPython. Lines tagged `# pragma: no cover (micropython)` (CPython-only branches) are excluded — they aren't reachable there.
-
-Both runtimes independently must hit their coverage threshold on their own reachable line set. A change that breaks MicroPython compat fails the matrix even if it leaves CPython green. Result: you can take a `git pull` of `main` and run it on an ESP32-S3 (with `MICROPY_PY_SYS_SETTRACE`) or a Pi Zero with the same confidence as on a server. **No silent breakage.**
+**It's safe to use because CI proves it.** Every PR runs the test suite as a matrix on both runtimes — CPython `pytest --cov=exoclaw` and a MicroPython runner (`tests/_micropython_runner/run.py`) that executes the same tests under MP's unix port and traces line coverage via `sys.settrace`. Both must independently hit ≥95% on their own reachable line set, with `# pragma: no cover (cpython|micropython)` markers gating per-runtime branches. A change that breaks MicroPython compat fails the matrix even if CPython stays green.
 
 The aspirational target is detailed in `docs/memory-model.md` — the same memory architecture work that bounded multi-tenant openclaw's RAM (Steps A-D) is what makes single-tenant MicroPython runtime possible. Per-active-turn working set is now ~100 KiB; per-session baseline ~5 KiB; aggregate fits comfortably under an 8 MiB cgroup or a 512 MiB single-board Linux.
 
-**What you don't need to think about:**
+### Running on a device
+
+On a real MicroPython target (ESP32-S3 8MB + WiFi is the reference), the standard `micropython` build is enough — you don't need the `coverage` variant. That's a contributor-only thing for running this repo's test gate.
+
+```python
+# 1. On your dev machine, install the modules exoclaw imports.
+mpremote mip install asyncio dataclasses datetime typing __future__
+
+# 2. Copy the package onto the device.
+mpremote cp -r exoclaw :exoclaw/
+
+# 3. Use it. Bring your own LLMProvider, Conversation, and channels —
+#    those are protocols exoclaw doesn't ship implementations of.
+mpremote run main.py
+```
+
+The unix port works the same way without `mpremote` — just put `exoclaw/` on `MICROPYPATH`.
+
+What you don't have to think about:
 
 - **Branching in your code.** Import from `exoclaw.executor` / `exoclaw.agent.loop` / etc. as normal; the shim handles the runtime split internally.
-- **Stub modules.** `__future__` and `typing` ship with MicroPython via `mip install`; vendored stubs live in `tests/_micropython_stubs/` so CI doesn't need a network round-trip.
-- **Build setup.** Locally, `brew install micropython` covers the basics; for coverage measurement, build the unix port's `coverage` variant from source (instructions in `tests/test_micropython_runner.py`'s docstring). CI does this once per PR.
+- **Streaming tools.** `async def execute_streaming(): yield ...` works on both runtimes. On MP the executor drains via plain `for` (uasyncio doesn't ship the async-iterator protocol) but the tool author writes the same code.
+- **Per-task isolation.** `_compat.TaskLocal` keys storage by `id(asyncio.current_task())` on MP, so concurrent turns don't cross-wire each other's `turn.id` / `session.key` / scratch paths.
 
-Plugins haven't been ported. The MicroPython story today is: **core itself runs cleanly; deploy your own LLM provider + lightweight tool set**. The reference micro-friendly provider is on the roadmap (`exoclaw-provider-micro-openai` — a ~300-line `urequests`/`ussl` client), and the [`exoclaw-plugins`](https://github.com/Clause-Logic/exoclaw-plugins) repo's port to MicroPython is tracked separately.
+Plugins haven't been ported. The story today is: **core runs cleanly; deploy your own LLM provider + lightweight tool set**. A reference micro-friendly provider (`exoclaw-provider-micro-openai`, ~300 lines around `urequests`/`ussl`) is on the roadmap, and [`exoclaw-plugins`](https://github.com/Clause-Logic/exoclaw-plugins) tracks its own port separately.
+
+### Contributing — running the test gate locally
+
+The CI matrix needs `sys.settrace`, which the brew bottle of MicroPython doesn't enable. To run the gate locally, build the unix port's `coverage` variant from source:
+
+```bash
+git clone --depth 1 https://github.com/micropython/micropython ~/dev/micropython
+cd ~/dev/micropython/ports/unix
+# Freeze asyncio into the coverage build (the standard variant has it; coverage doesn't).
+echo 'include("$(MPY_DIR)/extmod/asyncio")' >> variants/coverage/manifest.py
+make submodules && make VARIANT=coverage -j$(nproc)
+
+# Tell exoclaw where to find it (or set in mise.local.toml under [env]).
+export EXOCLAW_MICROPYTHON_BIN=~/dev/micropython/ports/unix/build-coverage/micropython
+```
+
+Then from the exoclaw repo:
+
+```bash
+mise run test-micro    # full matrix entry — CPython-side wrapper drives the runner
+mise run mp-shell      # drop into a REPL with exoclaw on MICROPYPATH
+mise run mp-run        # run the runner directly, prints JSON report
+```
+
+CI does the same build + asyncio manifest patch once per PR (cached).
 
 ---
 

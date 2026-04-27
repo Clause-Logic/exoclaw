@@ -8,38 +8,56 @@ if TYPE_CHECKING:
     from exoclaw.executor import Executor
 
 
-class ToolContext:
-    """
-    Session context passed to tools that implement execute_with_context().
+from exoclaw._compat import IS_MICROPYTHON
 
-    Duck-typed — tools that need session routing implement:
+if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+    from dataclasses import dataclass, field
 
-        async def execute_with_context(self, ctx: ToolContext, **kwargs: object) -> str:
-            ...
+    @dataclass
+    class ToolContext:
+        """
+        Session context passed to tools that implement execute_with_context().
 
-    Tools that don't need it keep execute(**kwargs) and the registry handles both.
+        Duck-typed — tools that need session routing implement:
 
-    The optional ``executor`` field gives tools access to the environment's
-    durable execution layer (DBOS, Temporal, etc.). Tools that want durable
-    I/O (e.g. LLM calls with automatic retries and checkpointing) can use
-    ``ctx.executor.chat(...)`` instead of calling the provider directly.
+            async def execute_with_context(self, ctx: ToolContext, **kwargs: object) -> str:
+                ...
 
-    Plain class with explicit ``__init__`` (not ``@dataclass``) so it
-    loads on MicroPython, which strips ``name: type`` annotations at
-    compile time.
-    """
+        Tools that don't need it keep execute(**kwargs) and the registry handles both.
 
-    def __init__(
-        self,
-        session_key: str,
-        channel: str,
-        chat_id: str,
-        executor: Executor | None = None,
-    ) -> None:
-        self.session_key = session_key
-        self.channel = channel
-        self.chat_id = chat_id
-        self.executor = executor
+        The optional ``executor`` field gives tools access to the environment's
+        durable execution layer (DBOS, Temporal, etc.). Tools that want durable
+        I/O (e.g. LLM calls with automatic retries and checkpointing) can use
+        ``ctx.executor.chat(...)`` instead of calling the provider directly.
+
+        Real ``@dataclass`` on CPython so downstream callers using
+        ``dataclasses.asdict`` / ``fields`` for journaling keep
+        working unchanged.
+        """
+
+        session_key: str
+        channel: str
+        chat_id: str
+        executor: "Executor | None" = field(default=None, repr=False)
+
+else:  # pragma: no cover (cpython)
+
+    class ToolContext:
+        """MicroPython fallback — plain class, see CPython branch
+        for the contract. MP strips ``name: type`` annotations at
+        compile time so we hand-write ``__init__``."""
+
+        def __init__(
+            self,
+            session_key: str,
+            channel: str,
+            chat_id: str,
+            executor: "Executor | None" = None,
+        ) -> None:
+            self.session_key = session_key
+            self.channel = channel
+            self.chat_id = chat_id
+            self.executor = executor
 
 
 @runtime_checkable

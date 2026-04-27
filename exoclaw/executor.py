@@ -28,33 +28,48 @@ from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.providers.protocol import LLMProvider
 from exoclaw.providers.types import LLMResponse
 
+if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+    from dataclasses import dataclass
 
-class ToolResult:
-    """Result of a tool invocation, possibly file-backed.
+    @dataclass
+    class ToolResult:
+        """Result of a tool invocation, possibly file-backed.
 
-    Carries either the inline string result or a path to a scratch
-    file that holds the full output. Tools that implement the
-    ``execute_streaming`` opt-in capability (memory-model.md Step D)
-    drain into a scratch file as chunks arrive — the executor
-    returns ``ToolResult(content=<short preview>, content_file=<path>)``
-    and the agent loop attaches the path to the tool message so a
-    file-backed provider can stream the full content into the LLM
-    request body without ever materialising it as one Python string.
+        Carries either the inline string result or a path to a
+        scratch file that holds the full output. Tools that implement
+        the ``execute_streaming`` opt-in capability (memory-model.md
+        Step D) drain into a scratch file as chunks arrive — the
+        executor returns ``ToolResult(content=<short preview>,
+        content_file=<path>)`` and the agent loop attaches the path
+        to the tool message so a file-backed provider can stream the
+        full content into the LLM request body without ever
+        materialising it as one Python string.
 
-    Tools without the streaming capability return
-    ``ToolResult(content=<full result>, content_file=None)`` — the
-    legacy inline path. ``content`` is always populated (with a
-    preview when ``content_file`` is set) so callers that don't look
-    at ``content_file`` still see something diagnostic.
+        Tools without the streaming capability return
+        ``ToolResult(content=<full result>, content_file=None)`` —
+        the legacy inline path. ``content`` is always populated
+        (with a preview when ``content_file`` is set) so callers
+        that don't look at ``content_file`` still see something
+        diagnostic.
 
-    Plain class (not ``@dataclass``) so it loads on MicroPython,
-    which strips ``name: type`` annotations at compile time — a
-    runtime dataclass decorator can't introspect them there.
-    """
+        Real ``@dataclass`` on CPython so downstream serializers
+        (``dataclasses.asdict`` in DBOS / nanobot journals) keep
+        working unchanged.
+        """
 
-    def __init__(self, content: str, content_file: str | None = None) -> None:
-        self.content = content
-        self.content_file = content_file
+        content: str
+        content_file: str | None = None
+
+else:  # pragma: no cover (cpython)
+
+    class ToolResult:
+        """MicroPython fallback — plain class, see CPython branch
+        for the contract. MP strips ``name: type`` annotations at
+        compile time so we hand-write ``__init__``."""
+
+        def __init__(self, content: str, content_file: str | None = None) -> None:
+            self.content = content
+            self.content_file = content_file
 
 
 if TYPE_CHECKING:

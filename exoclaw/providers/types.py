@@ -1,52 +1,87 @@
 """Shared data types for LLM provider responses.
 
-``ToolCallRequest`` and ``LLMResponse`` are plain classes with
-explicit ``__init__`` rather than ``@dataclass`` — MicroPython 1.27
-strips ``name: type`` annotations at compile time, so a runtime
-dataclass decorator can't introspect them. Manually-written
-``__init__`` is the cross-runtime path.
+CPython gets real ``@dataclass`` so downstream callers (executor
+plugins, nanobot config layer, anything that uses
+``dataclasses.asdict`` / ``fields`` / ``is_dataclass`` for journaling
+or serialization) keep working unchanged. MicroPython gets the same
+classes as plain classes with a hand-written ``__init__`` because
+MP strips ``name: type`` annotations at compile time, so a runtime
+``@dataclass`` decorator can't introspect them.
+
+Same constructor signatures + same attribute shape on both
+runtimes — only difference is ``@dataclass`` machinery (asdict,
+__eq__, __repr__) is CPython-only.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, NotRequired, Optional, Required, TypedDict, Union
 
+from exoclaw._compat import IS_MICROPYTHON
+
 
 class ContextWindowExceededError(Exception):
     """Raised by providers when the prompt exceeds the model's context window."""
 
 
-class ToolCallRequest:
-    """A tool call request from the LLM."""
+if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+    from dataclasses import dataclass, field
 
-    def __init__(self, id: str, name: str, arguments: dict[str, object]) -> None:
-        self.id = id
-        self.name = name
-        self.arguments = arguments
+    @dataclass
+    class ToolCallRequest:
+        """A tool call request from the LLM."""
 
+        id: str
+        name: str
+        arguments: dict[str, object]
 
-class LLMResponse:
-    """Response from an LLM provider."""
+    @dataclass
+    class LLMResponse:
+        """Response from an LLM provider."""
 
-    def __init__(
-        self,
-        content: str | None,
-        tool_calls: list[ToolCallRequest] | None = None,
-        finish_reason: str = "stop",
-        usage: dict[str, int] | None = None,
-        reasoning_content: str | None = None,
-        thinking_blocks: list[dict[str, object]] | None = None,
-    ) -> None:
-        self.content = content
-        self.tool_calls = tool_calls if tool_calls is not None else []
-        self.finish_reason = finish_reason
-        self.usage = usage if usage is not None else {}
-        self.reasoning_content = reasoning_content
-        self.thinking_blocks = thinking_blocks
+        content: str | None
+        tool_calls: list[ToolCallRequest] = field(default_factory=list)
+        finish_reason: str = "stop"
+        usage: dict[str, int] = field(default_factory=dict)
+        reasoning_content: str | None = None
+        thinking_blocks: list[dict[str, object]] | None = None
 
-    @property
-    def has_tool_calls(self) -> bool:
-        return len(self.tool_calls) > 0
+        @property
+        def has_tool_calls(self) -> bool:
+            return len(self.tool_calls) > 0
+
+else:  # pragma: no cover (cpython)
+
+    class ToolCallRequest:
+        """A tool call request from the LLM."""
+
+        def __init__(self, id: str, name: str, arguments: dict[str, object]) -> None:
+            self.id = id
+            self.name = name
+            self.arguments = arguments
+
+    class LLMResponse:
+        """Response from an LLM provider."""
+
+        def __init__(
+            self,
+            content: str | None,
+            tool_calls: list[ToolCallRequest] | None = None,
+            finish_reason: str = "stop",
+            usage: dict[str, int] | None = None,
+            reasoning_content: str | None = None,
+            thinking_blocks: list[dict[str, object]] | None = None,
+        ) -> None:
+            self.content = content
+            self.tool_calls = tool_calls if tool_calls is not None else []
+            self.finish_reason = finish_reason
+            self.usage = usage if usage is not None else {}
+            self.reasoning_content = reasoning_content
+            self.thinking_blocks = thinking_blocks
+
+        @property
+        def has_tool_calls(self) -> bool:
+            return len(self.tool_calls) > 0
 
 
 # ---------------------------------------------------------------------------

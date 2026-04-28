@@ -422,6 +422,35 @@ class _StubLogger:
         self._emit("error", event, **kw)
 
     def exception(self, event: str, **kw: Any) -> None:
+        # CPython's structlog auto-captures ``sys.exc_info()`` inside
+        # ``.exception``; the stub used in MP / structlog-less envs
+        # didn't, so log lines emitted from ``except: log.exception(...)``
+        # blocks dropped the actual exception entirely. Capture it
+        # explicitly here so the chip surfaces the same diagnostic
+        # info as the server.
+        import sys as _sys
+
+        exc_info = _sys.exc_info()
+        if exc_info and exc_info[1] is not None:
+            kw.setdefault("error", repr(exc_info[1]))
+            # MP exposes ``sys.print_exception`` (no ``traceback``
+            # module). CPython has ``traceback.print_exception``.
+            # Print to stderr so the structured log line stays
+            # parseable while the human-readable trace lands next
+            # to it.
+            pe = getattr(_sys, "print_exception", None)
+            if pe is not None:  # MicroPython
+                try:
+                    pe(exc_info[1])
+                except Exception:
+                    pass
+            else:  # CPython
+                try:
+                    import traceback as _tb
+
+                    _tb.print_exception(exc_info[0], exc_info[1], exc_info[2])
+                except Exception:
+                    pass
         self._emit("error", event, **kw)
 
     def debug(self, event: str, **kw: Any) -> None:

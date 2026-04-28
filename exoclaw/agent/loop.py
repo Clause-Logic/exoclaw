@@ -931,7 +931,12 @@ class AgentLoop:
         effective_progress: Callable[..., Awaitable[None]] | None = (
             _bus_progress
             if on_progress is _UNSET
-            else cast(Callable[..., Awaitable[None]] | None, on_progress)
+            # ``cast`` evaluates its first arg at runtime — wrap in a
+            # string so MicroPython doesn't try to evaluate
+            # ``Callable[..., Awaitable[None]] | None`` (which fails
+            # with ``unsupported types for __or__: '_Subscriptable',
+            # 'NoneType'`` on MP's typing shim).
+            else cast("Callable[..., Awaitable[None]] | None", on_progress)
         )
 
         final_content, new_msgs = await self.process_turn(

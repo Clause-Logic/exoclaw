@@ -200,6 +200,22 @@ def test_stub_logger_emits_json():
     assert log.bind(extra="ok") is log
 
 
+def test_stub_logger_exception_captures_active_exception():
+    """``.exception`` called from inside an ``except:`` block must
+    pick up ``sys.exc_info()`` and route it through the MP-side
+    ``sys.print_exception`` branch — covers the diagnostic-print
+    path the chip relies on for surfacing silent agent errors."""
+    log = c.get_logger("upy-exc")
+    try:
+        raise ValueError("test exception")
+    except ValueError:
+        # The branch under test reads ``sys.exc_info()``, falls into
+        # the ``pe is not None`` arm (MP exposes ``sys.print_exception``),
+        # and prints the trace to stderr. We just verify it doesn't
+        # raise; the print itself goes to fd 2 and isn't captured.
+        log.exception("captured_event")
+
+
 # ── Path shim coverage ───────────────────────────────────────────
 
 

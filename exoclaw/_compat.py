@@ -445,7 +445,11 @@ class _StubLogger:
             import sys as _sys
 
             try:
-                _sys.print_exception(exc_info[1])
+                # ``sys.print_exception`` is MP-only — ``getattr`` keeps
+                # ty quiet on CPython where the attribute genuinely
+                # doesn't exist.
+                _sys_print_exception = getattr(_sys, "print_exception")
+                _sys_print_exception(exc_info[1])
             except Exception:
                 pass
         else:  # pragma: no cover (micropython): CPython-only branch

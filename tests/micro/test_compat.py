@@ -437,6 +437,76 @@ def test_async_queue_size_and_put_nowait():
     assert q.empty() is False
 
 
+def test_make_semaphore_negative_value_raises():
+    """``value=0`` is valid (matches CPython's
+    ``asyncio.Semaphore`` contract — all callers wait until
+    ``release``). Only negatives raise."""
+    # ``0`` constructs fine.
+    c.make_semaphore(0)
+    try:
+        c.make_semaphore(-1)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for value=-1")
+
+
+def test_make_semaphore_acquire_release_counts():
+    """Counting cap: two acquires fit at value=2; the third
+    suspends until a sibling ``release`` runs. Exercises the
+    wait → counter-check loop in ``_AsyncSemaphore.acquire``."""
+    import asyncio as _asyncio
+
+    order = []
+
+    async def _exercise():
+        sem = c.make_semaphore(2)
+        await sem.acquire()
+        order.append("a1")
+        await sem.acquire()
+        order.append("a2")
+
+        async def _third():
+            await sem.acquire()
+            order.append("a3")
+
+        third = _asyncio.create_task(_third())
+        # Yield so ``_third`` blocks inside ``acquire`` before we release.
+        await _asyncio.sleep(0)
+        assert order == ["a1", "a2"]
+        sem.release()
+        order.append("rel")
+        await third
+
+    _asyncio.run(_exercise())
+    assert order == ["a1", "a2", "rel", "a3"]
+
+
+def test_make_semaphore_async_with_serialises():
+    """``async with sem:`` is the load-bearing call shape — exercises
+    ``__aenter__`` / ``__aexit__`` so the cap holds when the runner
+    uses the context-manager form (which is what
+    ``AsyncioSpawner._gated`` does in exoclaw-subagent)."""
+    import asyncio as _asyncio
+
+    holding = [0]
+    peak = [0]
+
+    async def _hold(sem):
+        async with sem:
+            holding[0] += 1
+            if holding[0] > peak[0]:
+                peak[0] = holding[0]
+            await _asyncio.sleep(0)
+            holding[0] -= 1
+
+    async def _exercise():
+        sem = c.make_semaphore(1)
+        await _asyncio.gather(_hold(sem), _hold(sem), _hold(sem))
+
+    _asyncio.run(_exercise())
+    assert peak[0] == 1, "cap=1 should serialise all three holders"
+
+
 def test_unbind_log_contextvars_without_bag():
     """``unbind_log_contextvars`` is a no-op when the per-task bag
     hasn't been bound yet."""

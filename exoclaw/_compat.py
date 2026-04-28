@@ -422,7 +422,43 @@ class _StubLogger:
         self._emit("error", event, **kw)
 
     def exception(self, event: str, **kw: Any) -> None:
+        # CPython's structlog auto-captures ``sys.exc_info()`` inside
+        # ``.exception``; the stub used in MP / structlog-less envs
+        # didn't, so log lines emitted from ``except: log.exception(...)``
+        # blocks dropped the actual exception entirely. Capture it
+        # explicitly here so the chip surfaces the same diagnostic
+        # info as the server.
+        import sys as _sys
+
+        exc_info = _sys.exc_info()
+        if exc_info and exc_info[1] is not None:
+            kw.setdefault("error", repr(exc_info[1]))
+            self._print_exception_trace(exc_info)
         self._emit("error", event, **kw)
+
+    def _print_exception_trace(self, exc_info: Any) -> None:
+        # Split into a helper so the per-runtime branches are each
+        # behind a single pragma — the inline if/else version had
+        # the runner mark inner ``try``/``except`` lines as missing
+        # because pragmas on the outer ``if`` don't propagate down.
+        if IS_MICROPYTHON:  # pragma: no cover (cpython): MP-only branch
+            import sys as _sys
+
+            try:
+                # ``sys.print_exception`` is MP-only — ``getattr`` keeps
+                # ty quiet on CPython where the attribute genuinely
+                # doesn't exist.
+                _sys_print_exception = getattr(_sys, "print_exception")
+                _sys_print_exception(exc_info[1])
+            except Exception:
+                pass
+        else:  # pragma: no cover (micropython): CPython-only branch
+            try:
+                import traceback as _tb
+
+                _tb.print_exception(exc_info[0], exc_info[1], exc_info[2])
+            except Exception:
+                pass
 
     def debug(self, event: str, **kw: Any) -> None:
         self._emit("debug", event, **kw)

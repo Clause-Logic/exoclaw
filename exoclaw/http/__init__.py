@@ -21,9 +21,14 @@ Surface:
   ``aclose()`` to release. CPython pools connections via httpx; MP
   opens a fresh socket per call.
 - ``HTTPClient.stream_post(url, *, headers=None, content=None,
-  timeout=None)`` — async context manager yielding a streaming
-  response. ``content`` accepts bytes or ``AsyncIterable[bytes]``;
-  the iterable variant enables the streaming-prompt memory win.
+  timeout=None, method="POST")`` — async context manager yielding
+  a streaming response. ``content`` accepts bytes or
+  ``AsyncIterable[bytes]``; the iterable variant enables the
+  streaming-prompt memory win. Set ``method="GET"`` (or other
+  bodyless methods) to drive a chunked-response read without
+  sending a body — the chip web_fetch path needs this so that a
+  large HTML response can be parsed incrementally without ever
+  materialising the whole body in heap.
 - Response interface — ``status_code``, ``headers`` (lower-cased
   keys), ``aread()``, ``text`` (post-aread), ``raise_for_status()``,
   ``aiter_lines()``.
@@ -125,6 +130,7 @@ class ClientProto(Protocol):
         headers: dict[str, str] | None = None,
         content: AsyncIterable[bytes] | bytes | None = None,
         timeout: float | None = None,
+        method: str = "POST",
     ) -> StreamCMProto: ...
 
 

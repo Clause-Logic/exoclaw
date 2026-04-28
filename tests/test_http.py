@@ -97,6 +97,41 @@ async def test_stream_post_round_trip_via_mock_transport() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_post_method_get_drives_get_no_body() -> None:
+    """``method="GET"`` flows through to httpx and the response
+    streams back the same as POST. Verifies the request the
+    handler actually sees has ``method="GET"`` and no body —
+    important because the chip web_fetch path needs to issue real
+    GETs without forcing the caller to invent a body."""
+    seen: dict[str, object] = {}
+    body = b"<html><body>hello</body></html>"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        # ``request.read()`` returns the request body httpx serialised.
+        seen["body"] = await request.aread()
+        return httpx.Response(200, headers={"content-type": "text/html"}, content=body)
+
+    transport = httpx.MockTransport(handler)
+    raw = httpx.AsyncClient(transport=transport)
+
+    client = HttpxClient.__new__(HttpxClient)
+    client._client = raw
+    try:
+        async with client.stream_post("https://example.test/page", method="GET") as resp:
+            assert resp.status_code == 200
+            assert resp.headers["content-type"] == "text/html"
+            text = await resp.aread()
+            assert text == body
+    finally:
+        await raw.aclose()
+
+    assert seen["method"] == "GET"
+    # GET should carry no body — the caller didn't pass one and we
+    # MUST NOT have invented chunked-transfer framing on its behalf.
+    assert seen["body"] == b""
+
+
 async def test_stream_post_translates_connect_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("simulated connect failure")

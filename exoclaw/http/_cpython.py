@@ -73,19 +73,21 @@ class HttpxStreamCM:
         headers: dict[str, str] | None,
         content: "AsyncIterable[bytes] | bytes | None",
         timeout: float | None,
+        method: str = "POST",
     ) -> None:
         self._client = client
         self._url = url
         self._headers = headers
         self._content = content
         self._timeout = timeout
+        self._method = method
         self._cm: object = None
 
     async def __aenter__(self) -> HttpxResponse:
         import httpx
 
         cm = self._client.stream(
-            "POST",
+            self._method,
             self._url,
             headers=self._headers or {},
             content=self._content,
@@ -137,8 +139,9 @@ class HttpxClient:
         headers: dict[str, str] | None = None,
         content: "AsyncIterable[bytes] | bytes | None" = None,
         timeout: float | None = None,
+        method: str = "POST",
     ) -> HttpxStreamCM:
-        return HttpxStreamCM(self._client, url, headers, content, timeout)
+        return HttpxStreamCM(self._client, url, headers, content, timeout, method=method)
 
 
 def from_httpx(client: "httpx.AsyncClient") -> HttpxClient:

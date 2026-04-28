@@ -345,6 +345,40 @@ def test_send_request_emits_chunked_body_with_iterable_content():
     assert sent.endswith(b"0\r\n\r\n")
 
 
+def test_send_request_emits_get_with_no_body():
+    """``method="GET"`` produces: request line with GET +
+    headers + blank-line terminator. NO ``Transfer-Encoding:
+    chunked`` (RFC 9110 — bodyless methods don't carry that
+    header), NO chunked-body bytes, NO ``0\\r\\n\\r\\n``
+    terminator. The chip web_fetch path needs this to issue real
+    GETs without forcing a synthetic empty body."""
+    writer = _FakeWriter()
+    cm = h_mp.MPStreamCM(
+        "https://example.test/page",
+        headers={"Accept": "text/html"},
+        content=None,
+        timeout=5.0,
+        ssl_context=None,
+        method="GET",
+    )
+
+    async def _go():
+        await cm._send_request(writer, "example.test", "/page", h_mp._deadline_ms(60))
+
+    asyncio.run(_go())
+    sent = writer.written
+    # Request line uses GET, not POST.
+    assert sent.startswith(b"GET /page HTTP/1.1\r\n")
+    assert b"Host: example.test\r\n" in sent
+    assert b"Accept: text/html\r\n" in sent
+    # GET MUST NOT declare chunked transfer.
+    assert b"Transfer-Encoding: chunked" not in sent
+    # GET MUST NOT emit chunked-body framing.
+    assert b"\r\n0\r\n\r\n" not in sent
+    # Header section ends with the standard double CRLF.
+    assert sent.endswith(b"\r\n\r\n")
+
+
 def test_send_request_emits_one_shot_bytes_as_single_chunk():
     """Passing ``content=<bytes>`` produces a single chunk + terminator."""
     writer = _FakeWriter()

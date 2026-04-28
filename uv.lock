@@ -139,7 +139,7 @@ toml = [
 
 [[package]]
 name = "exoclaw"
-version = "0.26.2"
+version = "0.26.5"
 source = { editable = "." }
 dependencies = [
     { name = "structlog" },

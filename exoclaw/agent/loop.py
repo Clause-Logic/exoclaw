@@ -12,8 +12,10 @@ from exoclaw._compat import (
     get_log_contextvars,
     get_logger,
     monotonic_diff_ms,
-    monotonic_ms,
     unbind_log_contextvars,
+)
+from exoclaw._compat import (
+    monotonic_ms as _module_monotonic_ms,
 )
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import Tool, ToolContext
@@ -102,6 +104,13 @@ class AgentLoop:
             if hasattr(tool, "set_registry"):
                 tool.set_registry(self.tools)  # type: ignore[call-non-callable]
         self._log: Any = logger or get_logger()
+        # Bound clock — executor's ``monotonic_ms`` lets durable executors
+        # substitute a deterministic clock. Test mocks and any custom executor
+        # that doesn't ship the method fall back to the module helper. Cached
+        # once because the call sites are on the per-tool / per-turn hot path.
+        self._monotonic_ms: Callable[[], int] = getattr(
+            self._executor, "monotonic_ms", _module_monotonic_ms
+        )
         self._running = False
         self._active_tasks: dict[str, list[asyncio.Task[None]]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
@@ -395,7 +404,7 @@ class AgentLoop:
                         },
                         args=args_str[:200],
                     )
-                    t0 = monotonic_ms()
+                    t0 = self._monotonic_ms()
                     status = "ok"
                     exc: BaseException | None = None
                     result = ""
@@ -443,7 +452,7 @@ class AgentLoop:
                             "\n\n[Analyze the error above and try a different approach.]"
                         )
                     finally:
-                        duration_ms = monotonic_diff_ms(monotonic_ms(), t0)
+                        duration_ms = monotonic_diff_ms(self._monotonic_ms(), t0)
                         stop_kwargs: dict[str, object] = {
                             "tool.name": tool_call.name,
                             "tool.call_id": tool_call.id,
@@ -631,7 +640,7 @@ class AgentLoop:
                 "turn.chain": chain,
             }
         )
-        turn_start = monotonic_ms()
+        turn_start = self._monotonic_ms()
         self._log.info("turn_start")
         try:
             initial = await self._executor.build_prompt(
@@ -671,7 +680,7 @@ class AgentLoop:
         finally:
             self._log.info(
                 "turn_end",
-                **{"turn.duration_ms": monotonic_diff_ms(monotonic_ms(), turn_start)},
+                **{"turn.duration_ms": monotonic_diff_ms(self._monotonic_ms(), turn_start)},
             )
             to_rebind = {k: v for k, v in prior_turn_ctx.items() if v is not _sentinel}
             to_unbind = tuple(k for k, v in prior_turn_ctx.items() if v is _sentinel)

@@ -343,12 +343,14 @@ class MPStreamCM:
         content: "AsyncIterable[bytes] | bytes | None",
         timeout: float,
         ssl_context: "ssl.SSLContext | bool | None",
+        method: str = "POST",
     ) -> None:
         self._url = url
         self._headers = headers or {}
         self._content = content
         self._timeout = timeout
         self._ssl_context = ssl_context
+        self._method = method
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
 
@@ -452,13 +454,21 @@ class MPStreamCM:
         same task that's also doing IO via ``_io_queue.queue_write``,
         which on MP races into a pairheap-double-push assert.
         """
-        lines = ["POST {} HTTP/1.1".format(path), "Host: {}".format(host)]
+        lines = ["{} {} HTTP/1.1".format(self._method, path), "Host: {}".format(host)]
         seen = {k.lower() for k in self._headers}
         if "user-agent" not in seen:
             lines.append("User-Agent: exoclaw-http/1.0")
         if "accept" not in seen:
             lines.append("Accept: */*")
-        lines.append("Transfer-Encoding: chunked")
+        # Bodyless methods (GET / HEAD) MUST NOT carry a
+        # ``Transfer-Encoding: chunked`` header — a well-behaved
+        # server will ignore it but some return 400 (RFC 9110 says
+        # Content-Length / Transfer-Encoding are only meaningful on
+        # a request that has a body). Method == GET also signals
+        # that the body-write loop below must be a no-op.
+        bodyless = self._method in ("GET", "HEAD")
+        if not bodyless:
+            lines.append("Transfer-Encoding: chunked")
         for k, v in self._headers.items():
             if k.lower() == "transfer-encoding":
                 continue
@@ -472,6 +482,10 @@ class MPStreamCM:
             if _expired(deadline_ms):
                 raise HTTPWriteTimeout("header write deadline exceeded")
             await drain()
+
+        # GET/HEAD: headers-only request, no body framing.
+        if bodyless:
+            return
 
         content = self._content
         if content is None:
@@ -560,5 +574,13 @@ class MPClient:
         headers: dict[str, str] | None = None,
         content: "AsyncIterable[bytes] | bytes | None" = None,
         timeout: float | None = None,
+        method: str = "POST",
     ) -> MPStreamCM:
-        return MPStreamCM(url, headers, content, timeout or self._timeout, self._ssl_context)
+        return MPStreamCM(
+            url,
+            headers,
+            content,
+            timeout or self._timeout,
+            self._ssl_context,
+            method=method,
+        )

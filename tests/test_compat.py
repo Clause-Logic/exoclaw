@@ -318,6 +318,75 @@ def test_async_queue_round_trip() -> None:
     asyncio.run(_fallback_round_trip())
 
 
+def test_make_semaphore_round_trip() -> None:
+    """``make_semaphore`` returns a real ``asyncio.Semaphore`` on
+    CPython. The ``_AsyncSemaphore`` class is the MicroPython
+    fallback; construct + drive it directly here so the methods
+    are exercised on CPython too — same pattern as
+    ``_AsyncQueue`` above."""
+    import asyncio
+
+    sem = c.make_semaphore(2)
+    assert isinstance(sem, asyncio.Semaphore)
+
+    async def _round_trip() -> None:
+        async with sem:
+            async with sem:
+                # Cap reached — third would block; just assert
+                # the count surface here without engaging gather.
+                pass
+
+    asyncio.run(_round_trip())
+
+    # ``value=0`` is valid (matches CPython's contract); negatives raise.
+    c.make_semaphore(0)
+    with pytest.raises(ValueError):
+        c.make_semaphore(-1)
+
+    # ── _AsyncSemaphore (MP fallback) ───────────────────────────
+    fallback = c._AsyncSemaphore(1)
+
+    holding = [0]
+    peak = [0]
+
+    async def _hold() -> None:
+        async with fallback:
+            holding[0] += 1
+            if holding[0] > peak[0]:
+                peak[0] = holding[0]
+            await asyncio.sleep(0)
+            holding[0] -= 1
+
+    async def _serialised() -> None:
+        await asyncio.gather(_hold(), _hold(), _hold())
+
+    asyncio.run(_serialised())
+    assert peak[0] == 1, "cap=1 should serialise all three holders"
+
+    # ``value=0`` is valid on the fallback too — start clamped.
+    sem_zero = c._AsyncSemaphore(0)
+    woken = []
+
+    async def _zero_blocked() -> None:
+        async def _waiter() -> None:
+            await sem_zero.acquire()
+            woken.append("ok")
+
+        task = asyncio.create_task(_waiter())
+        # Yield once so the waiter blocks on ``event.wait()``.
+        await asyncio.sleep(0)
+        assert woken == [], "value=0 should keep all callers blocked"
+        sem_zero.release()
+        await task
+
+    asyncio.run(_zero_blocked())
+    assert woken == ["ok"]
+
+    # Negatives raise — same as CPython's ``asyncio.Semaphore``.
+    with pytest.raises(ValueError):
+        c._AsyncSemaphore(-1)
+
+
 class TestAiterCompat:
     """``aiter_compat`` adapts sync OR async generators to the
     ``async for`` protocol. CPython's branch wraps real async

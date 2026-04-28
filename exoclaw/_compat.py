@@ -610,6 +610,86 @@ def make_async_queue() -> Any:
     return asyncio.Queue()  # pragma: no cover (micropython)
 
 
+class _AsyncSemaphore:
+    """Minimal ``asyncio.Semaphore`` replacement for MicroPython.
+
+    uasyncio ships ``Lock`` and ``Event`` but not ``Semaphore``
+    (the unix port's frozen ``asyncio`` build is checked
+    explicitly: ``hasattr(asyncio, 'Semaphore')`` is ``False``).
+    Plugins that want a counting cap on concurrent tasks
+    — exoclaw-subagent's ``AsyncioSpawner(max_concurrent=N)``
+    is the load-bearing caller — would otherwise have to gate the
+    feature on runtime, which contradicts the "any MP target, any
+    policy" framing.
+
+    Counter + ``asyncio.Event`` is enough: ``acquire`` waits for
+    the event, decrements, and clears the event when the counter
+    hits zero; ``release`` increments and sets the event. The
+    cooperative single-task model on MP means the
+    wait-then-decrement window is race-free without a real lock —
+    no preemption point between ``await event.wait()`` returning
+    and the counter check on the next line.
+
+    Same ``acquire`` / ``release`` / ``__aenter__`` / ``__aexit__``
+    surface as ``asyncio.Semaphore`` so plugins use ``async with
+    sem:`` unchanged across both runtimes.
+    """
+
+    def __init__(self, value: int) -> None:
+        # Match CPython's ``asyncio.Semaphore`` boundary contract —
+        # ``value=0`` is valid (all callers wait until ``release``)
+        # and only negatives raise.
+        if value < 0:
+            raise ValueError("Semaphore initial value must be >= 0")
+        self._value = value
+        # Lazy import — same reasoning as ``_AsyncQueue``.
+        import asyncio as _asyncio
+
+        self._event = _asyncio.Event()
+        if value > 0:
+            self._event.set()
+
+    async def acquire(self) -> bool:
+        # Loop on spurious wake — ``release`` from a sibling task
+        # may set the event between us seeing ``_value == 0`` and
+        # ``acquire`` running again. Cooperative scheduling means
+        # we won't actually loop more than necessary; this is just
+        # defensive structure.
+        while True:
+            await self._event.wait()
+            if self._value > 0:
+                self._value -= 1
+                if self._value == 0:
+                    self._event.clear()
+                return True
+
+    def release(self) -> None:
+        self._value += 1
+        self._event.set()
+
+    async def __aenter__(self) -> "_AsyncSemaphore":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.release()
+
+
+def make_semaphore(value: int) -> Any:
+    """Return an ``asyncio.Semaphore``-shaped object for the running runtime.
+
+    On CPython this is a real ``asyncio.Semaphore``. On MicroPython
+    this is the minimal ``_AsyncSemaphore`` above — same
+    ``acquire`` / ``release`` / ``async with`` surface so callers
+    don't branch on runtime.
+    """
+    if IS_MICROPYTHON:  # pragma: no cover (cpython)
+        return _AsyncSemaphore(value)
+    import asyncio  # pragma: no cover (micropython)
+
+    return asyncio.Semaphore(value)  # pragma: no cover (micropython)
+
+
 # ── Logger contextvars (per-turn binding) ────────────────────────────────────
 
 
@@ -1100,6 +1180,7 @@ __all__ = [
     "iscoroutinefunction",
     "make_async_queue",
     "make_lock",
+    "make_semaphore",
     "make_scratch_path",
     "monotonic_diff_ms",
     "monotonic_ms",

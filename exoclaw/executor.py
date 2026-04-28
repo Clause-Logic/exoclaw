@@ -337,6 +337,19 @@ class Executor(Protocol):
         result = await self.execute_tool(registry, name, params, ctx, tool_call_id=tool_call_id)
         return ToolResult(content=result, content_file=None)
 
+    def monotonic_ms(self) -> int:
+        """Return a millisecond-resolution monotonic clock value.
+
+        DirectExecutor reads real wall time. Durable executors that run
+        agent code inside a sandboxed workflow runtime (e.g. Temporal,
+        DBOS) implement this to return their workflow's deterministic
+        clock so duration telemetry doesn't trip the sandbox's wall-clock
+        restrictions or break replay. The agent loop uses the return only
+        for telemetry (``turn.duration_ms`` and similar), so under-reporting
+        is acceptable.
+        """
+        ...
+
     async def build_prompt(
         self,
         conversation: Conversation,
@@ -496,6 +509,12 @@ class DirectExecutor:
     # message into, so it leaves the bus's asyncio-queue path in place
     # and ``AgentLoop.run`` drains it.
     handles_inbound_enqueue: bool = False
+
+    def monotonic_ms(self) -> int:
+        """Real wall-clock monotonic time. Durable executors override."""
+        from exoclaw._compat import monotonic_ms as _mod_monotonic_ms
+
+        return _mod_monotonic_ms()
 
     def __init__(self) -> None:
         # Per-instance ContextVars: each executor has its own bindings,

@@ -868,3 +868,43 @@ class TestContextOverflow:
 
         assert final == "done after compact"
         assert call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Executor.monotonic_ms (opt-in via getattr — same pattern as enqueue_inbound)
+# ---------------------------------------------------------------------------
+
+
+class TestExecutorMonotonicMs:
+    """AgentLoop binds the clock once at __init__, prefers executor's override."""
+
+    def test_uses_executor_monotonic_ms_when_present(self) -> None:
+        executor = MagicMock()
+        executor.handles_response_send = False
+        executor.handles_inbound_enqueue = False
+        executor.monotonic_ms = MagicMock(return_value=12345)
+
+        loop, _ = _make_loop(executor=executor)
+
+        assert loop._monotonic_ms is executor.monotonic_ms
+        assert loop._monotonic_ms() == 12345
+
+    def test_falls_back_to_module_helper_when_missing(self) -> None:
+        # Object with no `monotonic_ms` attribute — getattr returns the default.
+        class BareExecutor:
+            handles_response_send = False
+            handles_inbound_enqueue = False
+
+        from exoclaw._compat import monotonic_ms as module_monotonic_ms
+
+        loop, _ = _make_loop(executor=BareExecutor())
+
+        assert loop._monotonic_ms is module_monotonic_ms
+
+    def test_default_direct_executor_uses_real_clock(self) -> None:
+        loop, _ = _make_loop()  # default DirectExecutor
+
+        before = loop._monotonic_ms()
+        after = loop._monotonic_ms()
+        assert isinstance(before, int)
+        assert after >= before

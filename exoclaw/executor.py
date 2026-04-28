@@ -337,18 +337,13 @@ class Executor(Protocol):
         result = await self.execute_tool(registry, name, params, ctx, tool_call_id=tool_call_id)
         return ToolResult(content=result, content_file=None)
 
-    def monotonic_ms(self) -> int:
-        """Return a millisecond-resolution monotonic clock value.
-
-        DirectExecutor reads real wall time. Durable executors that run
-        agent code inside a sandboxed workflow runtime (e.g. Temporal,
-        DBOS) implement this to return their workflow's deterministic
-        clock so duration telemetry doesn't trip the sandbox's wall-clock
-        restrictions or break replay. The agent loop uses the return only
-        for telemetry (``turn.duration_ms`` and similar), so under-reporting
-        is acceptable.
-        """
-        ...
+    # ``monotonic_ms`` is intentionally NOT on the protocol — same pattern as
+    # ``enqueue_inbound`` and ``set_prior_source``. Adding it would silently
+    # break back-compat for external executors that already conform
+    # structurally. ``AgentLoop`` reads it via ``getattr`` at init time and
+    # falls back to ``_compat.monotonic_ms`` so opting in is purely additive.
+    # Durable executors (Temporal, DBOS, …) implement the method on the
+    # concrete class to substitute a deterministic clock for replay safety.
 
     async def build_prompt(
         self,
@@ -511,7 +506,13 @@ class DirectExecutor:
     handles_inbound_enqueue: bool = False
 
     def monotonic_ms(self) -> int:
-        """Real wall-clock monotonic time. Durable executors override."""
+        """Real runtime monotonic clock in milliseconds.
+
+        Durable executors that run inside a sandboxed workflow runtime
+        (Temporal, DBOS, …) implement this to substitute their workflow's
+        deterministic clock — keeps replay safe and avoids the sandbox's
+        ban on ``time.monotonic``.
+        """
         from exoclaw._compat import monotonic_ms as _mod_monotonic_ms
 
         return _mod_monotonic_ms()

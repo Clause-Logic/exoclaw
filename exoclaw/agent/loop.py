@@ -12,8 +12,10 @@ from exoclaw._compat import (
     get_log_contextvars,
     get_logger,
     monotonic_diff_ms,
-    monotonic_ms as _module_monotonic_ms,
     unbind_log_contextvars,
+)
+from exoclaw._compat import (
+    monotonic_ms as _module_monotonic_ms,
 )
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.tools.protocol import Tool, ToolContext

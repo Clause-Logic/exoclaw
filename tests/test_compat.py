@@ -496,3 +496,36 @@ class TestCPythonShimDelegations:
 
         assert is_executable("/bin/sh") is True
         assert is_executable("/definitely/not/a/real/path") is False
+
+
+def test_getenv_passthrough_when_os_getenv_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On CPython (and MicroPython unix port) ``os.getenv`` ships, so
+    the shim should hand off transparently. Verify both the
+    found-key and missing-key (default) branches."""
+    from exoclaw import _compat
+
+    monkeypatch.setenv("EXOCLAW_TEST_PASSTHROUGH", "yes")
+    assert _compat.getenv("EXOCLAW_TEST_PASSTHROUGH") == "yes"
+    assert _compat.getenv("EXOCLAW_TEST_PASSTHROUGH", "fallback") == "yes"
+
+    monkeypatch.delenv("EXOCLAW_TEST_PASSTHROUGH", raising=False)
+    assert _compat.getenv("EXOCLAW_TEST_PASSTHROUGH") is None
+    assert _compat.getenv("EXOCLAW_TEST_PASSTHROUGH", "fallback") == "fallback"
+
+
+def test_getenv_returns_default_when_os_getenv_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare-metal MicroPython doesn't expose ``os.getenv``. Simulate
+    by stubbing the ``os`` reference inside ``_compat`` to one that
+    lacks the attribute, and verify the shim returns ``default``
+    instead of raising."""
+    from exoclaw import _compat
+
+    class _StubOS:
+        # Intentionally no ``getenv`` attribute.
+        pass
+
+    monkeypatch.setattr(_compat, "os", _StubOS())
+    assert _compat.getenv("ANYTHING") is None
+    assert _compat.getenv("ANYTHING", "fallback") == "fallback"

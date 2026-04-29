@@ -547,12 +547,15 @@ def path_basename(path: str) -> str:
 
 
 def getenv(name: str, default: str | None = None) -> str | None:
-    """Cross-runtime ``os.getenv``. CPython and MicroPython's unix port
-    both ship ``os.getenv``; MicroPython on bare-metal targets (ESP32 et
-    al) does not, so a direct ``os.getenv`` call ``AttributeError``s and
-    crashes the chip during init. This helper falls back to ``default``
-    on those runtimes — chip code should keep providing a sensible
-    default for any value it tries to read."""
+    """Cross-runtime ``os.getenv``.
+
+    CPython and MicroPython's unix port both ship ``os.getenv``;
+    MicroPython on bare-metal targets (ESP32, ESP32-S3, ...) does not.
+    A direct ``os.getenv`` call there raises ``AttributeError`` mid-init
+    and the chip drops to friendly REPL. This helper returns ``default``
+    on those runtimes — chip code should keep passing a sensible default
+    for any value it reads.
+    """
     fn = getattr(os, "getenv", None)
     if fn is None:
         return default

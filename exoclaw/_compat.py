@@ -546,6 +546,19 @@ def path_basename(path: str) -> str:
     return path[idx + 1 :]
 
 
+def getenv(name: str, default: str | None = None) -> str | None:
+    """Cross-runtime ``os.getenv``. CPython and MicroPython's unix port
+    both ship ``os.getenv``; MicroPython on bare-metal targets (ESP32 et
+    al) does not, so a direct ``os.getenv`` call ``AttributeError``s and
+    crashes the chip during init. This helper falls back to ``default``
+    on those runtimes — chip code should keep providing a sensible
+    default for any value it tries to read."""
+    fn = getattr(os, "getenv", None)
+    if fn is None:
+        return default
+    return fn(name, default)
+
+
 # ── Async queue (uasyncio fallback for ``asyncio.Queue``) ────────────────────
 
 
@@ -914,7 +927,7 @@ if IS_MICROPYTHON:  # pragma: no cover (cpython)
 
         def expanduser(self) -> "Path":
             if self._path.startswith("~"):
-                home = os.getenv("HOME", "/")
+                home = getenv("HOME", "/") or "/"
                 return Path(home + self._path[1:])
             return self
 

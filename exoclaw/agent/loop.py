@@ -113,7 +113,7 @@ class AgentLoop:
         self._on_tool_result = on_tool_result
         self._on_context_overflow = on_context_overflow
         if on_context_overflow is not None and _warnings is not None:
-            _warnings.warn(
+            _warnings.warn(  # pragma: no cover (micropython)
                 "AgentLoop(on_context_overflow=...) is deprecated; implement "
                 "Conversation.recover_from_overflow instead. The callback "
                 "operates on raw message lists and bypasses any conversation-"

@@ -223,6 +223,86 @@ def test_context_overflow_no_callback_returns_apology():
     asyncio.run(_go())
 
 
+def test_context_overflow_routes_to_conversation_recover():
+    """When the Conversation opts into ``recover_from_overflow`` and
+    no callback is configured, the loop routes through
+    ``Executor.recover_from_overflow`` (DirectExecutor's default
+    forwarder) and retries with the returned messages."""
+
+    call_count = [0]
+
+    class _OverflowOnceProvider:
+        def get_default_model(self):
+            return "m"
+
+        async def chat(self, messages, tools=None, model=None, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise ContextWindowExceededError("too big")
+            return LLMResponse(content="recovered via conversation")
+
+    class _RecoveringConv(_MemConv):
+        def __init__(self):
+            super().__init__()
+            self.recover_calls = 0
+
+        async def recover_from_overflow(self, session_id):
+            self.recover_calls += 1
+            return [{"role": "user", "content": "compacted"}]
+
+    conv = _RecoveringConv()
+    bus = MessageBus()
+    loop = AgentLoop(bus=bus, provider=_OverflowOnceProvider(), conversation=conv)
+
+    async def _go():
+        content, _ = await loop.process_turn("s", "long")
+        assert content == "recovered via conversation"
+        assert conv.recover_calls == 1
+        assert call_count[0] == 2
+
+    asyncio.run(_go())
+
+
+def test_context_overflow_caps_recovery_attempts():
+    """A ``recover_from_overflow`` that returns a still-too-big list on
+    every call must not loop forever — the AgentLoop caps attempts at
+    ``max_recovery_attempts`` (default 3) and surfaces the apology."""
+
+    class _AlwaysOverflowProvider:
+        def get_default_model(self):
+            return "m"
+
+        async def chat(self, messages, tools=None, model=None, **kw):
+            raise ContextWindowExceededError("nope")
+
+    class _StuckRecoverConv(_MemConv):
+        def __init__(self):
+            super().__init__()
+            self.recover_calls = 0
+
+        async def recover_from_overflow(self, session_id):
+            self.recover_calls += 1
+            return [{"role": "user", "content": "still too big"}]
+
+    conv = _StuckRecoverConv()
+    bus = MessageBus()
+    loop = AgentLoop(
+        bus=bus,
+        provider=_AlwaysOverflowProvider(),
+        conversation=conv,
+        max_recovery_attempts=3,
+    )
+
+    async def _go():
+        content, _ = await loop.process_turn("s", "long")
+        # Capped: tried recover 3 times, then gave up with apology.
+        assert conv.recover_calls == 3
+        assert content is not None
+        assert "context" in content.lower() or "window" in content.lower()
+
+    asyncio.run(_go())
+
+
 # ── _fmt helper for tool call logging ─────────────────────────────
 
 

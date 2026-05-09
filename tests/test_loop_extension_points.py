@@ -980,9 +980,7 @@ class TestContextOverflowConversationRecoverPath:
         from exoclaw.providers.types import ContextWindowExceededError
 
         loop, _ = _make_loop()
-        loop.conversation.recover_from_overflow = AsyncMock(
-            return_value=[{"x": 1}]
-        )
+        loop.conversation.recover_from_overflow = AsyncMock(return_value=[{"x": 1}])
         loop.provider.chat = AsyncMock(side_effect=ContextWindowExceededError("too big"))
 
         final, _, _ = await loop._run_agent_loop(

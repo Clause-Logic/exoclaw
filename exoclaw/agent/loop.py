@@ -5,16 +5,25 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import warnings
 from typing import Any, Awaitable, Callable, Coroutine, cast
 
 from exoclaw._compat import (
+    IS_MICROPYTHON,
     bind_log_contextvars,
     get_log_contextvars,
     get_logger,
     monotonic_diff_ms,
     unbind_log_contextvars,
 )
+
+# ``warnings`` isn't in MicroPython's stdlib. The deprecation
+# notice lives behind the IS_MICROPYTHON guard at the call site —
+# MP-deployed agents (firmware, ESP32) silently skip the notice
+# rather than crash on import. CPython gets the standard behaviour.
+if not IS_MICROPYTHON:  # pragma: no cover (micropython)
+    import warnings as _warnings
+else:  # pragma: no cover (cpython)
+    _warnings = None  # type: ignore[assignment]
 from exoclaw._compat import (
     monotonic_ms as _module_monotonic_ms,
 )
@@ -103,8 +112,8 @@ class AgentLoop:
         self._on_tool_calls = on_tool_calls
         self._on_tool_result = on_tool_result
         self._on_context_overflow = on_context_overflow
-        if on_context_overflow is not None:
-            warnings.warn(
+        if on_context_overflow is not None and _warnings is not None:
+            _warnings.warn(
                 "AgentLoop(on_context_overflow=...) is deprecated; implement "
                 "Conversation.recover_from_overflow instead. The callback "
                 "operates on raw message lists and bypasses any conversation-"

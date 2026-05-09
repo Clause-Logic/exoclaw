@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import warnings
 from typing import Any, Awaitable, Callable, Coroutine, cast
 
 from exoclaw._compat import (
@@ -66,12 +67,21 @@ class AgentLoop:
         on_tool_calls: Callable[["list[ToolCallRequest]"], Awaitable[None]] | None = None,
         # Called after each tool result (tool_call, result) — for streaming previews.
         on_tool_result: Callable[["ToolCallRequest", str], Awaitable[None]] | None = None,
-        # Called when the provider raises ContextWindowExceededError. Receives the current
-        # message list and should return a compacted version, or None to give up.
+        # DEPRECATED — prefer ``Conversation.recover_from_overflow`` (forwarded
+        # via ``Executor.recover_from_overflow``). When set, this callback is
+        # tried first on ``ContextWindowExceededError`` for back-compat; new
+        # consumers should leave this ``None`` and have their Conversation
+        # implement the recovery method instead. Receives the current message
+        # list and should return a compacted version, or ``None`` to give up.
         on_context_overflow: Callable[
             ["list[dict[str, object]]"], Awaitable["list[dict[str, object]] | None"]
         ]
         | None = None,
+        # Per-turn cap on overflow recovery attempts. Without a cap, a buggy
+        # callback or recovery method that returns the same too-big list on
+        # every retry would loop forever. Default mirrors OpenClaw's
+        # MAX_OVERFLOW_COMPACTION_ATTEMPTS.
+        max_recovery_attempts: int = 3,
         iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
         logger: Any | None = None,
@@ -93,6 +103,17 @@ class AgentLoop:
         self._on_tool_calls = on_tool_calls
         self._on_tool_result = on_tool_result
         self._on_context_overflow = on_context_overflow
+        if on_context_overflow is not None:
+            warnings.warn(
+                "AgentLoop(on_context_overflow=...) is deprecated; implement "
+                "Conversation.recover_from_overflow instead. The callback "
+                "operates on raw message lists and bypasses any conversation-"
+                "side state (e.g. the consolidation policy's sidecar), which "
+                "can desynchronise the persisted view from what the LLM saw.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self._max_recovery_attempts = max(1, int(max_recovery_attempts))
 
         self.conversation = conversation
 
@@ -309,6 +330,10 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
         effective_model = model or self.model
+        # Per-turn cap on recovery attempts — prevents an always-True
+        # callback / always-Some recover method from looping forever
+        # when the same prompt keeps overflowing post-compaction.
+        recovery_attempts = 0
         from exoclaw.executor import _supports_append as _has_append
 
         # Flushing decision is fully a function of what was passed in
@@ -344,12 +369,42 @@ class AgentLoop:
                     reasoning_effort=self.reasoning_effort,
                 )
             except ContextWindowExceededError:
-                if self._on_context_overflow:
+                if recovery_attempts >= self._max_recovery_attempts:
+                    self._log.error(
+                        "context_overflow_recovery_capped",
+                        iteration=iteration,
+                        attempts=recovery_attempts,
+                        cap=self._max_recovery_attempts,
+                    )
+                    final_content = (
+                        "The conversation exceeded the model's context window "
+                        "and I couldn't recover. Try starting a new session."
+                    )
+                    break
+                recovery_attempts += 1
+                compacted: "list[dict[str, object]] | None" = None
+                if self._on_context_overflow is not None:
+                    # Deprecated callback path. Wins for back-compat when set
+                    # — existing consumers keep working until they migrate to
+                    # ``Conversation.recover_from_overflow``.
                     compacted = await self._on_context_overflow(messages)
-                    if compacted is not None:
-                        self._log.info("context_compact", iteration=iteration)
-                        self._executor.set_messages(compacted)
-                        continue
+                else:
+                    # New path: ask the executor (which forwards to the
+                    # conversation's optional ``recover_from_overflow``).
+                    # Durable executors wrap the forwarded call in a step
+                    # for replay safety; pass-through executors just call
+                    # the conversation method directly.
+                    recover = getattr(self._executor, "recover_from_overflow", None)
+                    if recover is not None and session_id is not None:
+                        compacted = await recover(self.conversation, session_id)
+                if compacted is not None:
+                    self._log.info(
+                        "context_compact",
+                        iteration=iteration,
+                        attempt=recovery_attempts,
+                    )
+                    self._executor.set_messages(compacted)
+                    continue
                 self._log.error("context_overflow", iteration=iteration)
                 final_content = (
                     "The conversation exceeded the model's context window "

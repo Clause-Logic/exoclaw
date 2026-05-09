@@ -870,6 +870,213 @@ class TestContextOverflow:
         assert call_count == 3
 
 
+class TestContextOverflowConversationRecoverPath:
+    """``Conversation.recover_from_overflow`` (forwarded via
+    ``Executor.recover_from_overflow``) is the preferred path from
+    v0.27 onwards. The deprecated ``on_context_overflow`` callback
+    still wins when set; without it, the loop falls through to the
+    executor seam.
+    """
+
+    async def test_conversation_recover_called_when_no_callback(self) -> None:
+        """When the Conversation opts into ``recover_from_overflow``
+        and no callback is configured, the loop calls the conversation
+        path through the executor and retries."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        call_count = 0
+
+        async def mock_chat(*args: object, **kwargs: object) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ContextWindowExceededError("too big")
+            return _make_response(content="recovered via conversation")
+
+        loop, _ = _make_loop()
+        loop.conversation.recover_from_overflow = AsyncMock(
+            return_value=[{"role": "user", "content": "compacted"}]
+        )
+        loop.provider.chat = AsyncMock(side_effect=mock_chat)
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], session_id="sess:1"
+        )
+
+        assert final == "recovered via conversation"
+        loop.conversation.recover_from_overflow.assert_awaited_once_with("sess:1")
+
+    async def test_callback_wins_over_conversation_when_both_set(self) -> None:
+        """Back-compat: the deprecated callback path wins when set,
+        even if the Conversation also implements ``recover_from_overflow``.
+        Existing consumers don't have to migrate immediately."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        call_count = 0
+
+        async def mock_chat(*args: object, **kwargs: object) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ContextWindowExceededError("too big")
+            return _make_response(content="recovered")
+
+        async def callback(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+            # _run_agent_loop doesn't seed the executor, so messages
+            # may be empty here — the callback just returns any list.
+            return list(messages) or [{"role": "user", "content": "compacted"}]
+
+        loop, _ = _make_loop(on_context_overflow=callback)
+        loop.conversation.recover_from_overflow = AsyncMock(return_value=[{"x": 1}])
+        loop.provider.chat = AsyncMock(side_effect=mock_chat)
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], session_id="sess:1"
+        )
+
+        assert final == "recovered"
+        loop.conversation.recover_from_overflow.assert_not_called()
+
+    async def test_conversation_returns_none_gives_up(self) -> None:
+        """When the conversation path returns ``None`` and there's no
+        callback, the loop surfaces the give-up message."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        loop, _ = _make_loop()
+        loop.conversation.recover_from_overflow = AsyncMock(return_value=None)
+        loop.provider.chat = AsyncMock(side_effect=ContextWindowExceededError("too big"))
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], session_id="sess:1"
+        )
+
+        assert "context window" in final.lower()
+        loop.conversation.recover_from_overflow.assert_awaited_once_with("sess:1")
+
+    async def test_no_recover_method_no_callback_gives_up(self) -> None:
+        """Conversation that doesn't opt into ``recover_from_overflow``
+        and no callback → loop gives up immediately. Pre-existing
+        behaviour: nothing knows how to recover."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        loop, _ = _make_loop()
+        # spec'd MagicMock so attribute access raises rather than
+        # returning a fresh AsyncMock — emulates a real Conversation
+        # that hasn't implemented ``recover_from_overflow``.
+        loop.conversation = MagicMock(spec=["build_prompt", "record", "clear"])
+        loop.conversation.build_prompt = AsyncMock(return_value=[])
+        loop.provider.chat = AsyncMock(side_effect=ContextWindowExceededError("too big"))
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], session_id="sess:1"
+        )
+
+        assert "context window" in final.lower()
+
+    async def test_no_session_id_skips_conversation_path(self) -> None:
+        """The conversation path keys on ``session_id``. Callers that
+        invoke the loop without one (test harnesses, system-message
+        dispatch) skip recovery entirely — there's no session to recover."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        loop, _ = _make_loop()
+        loop.conversation.recover_from_overflow = AsyncMock(
+            return_value=[{"x": 1}]
+        )
+        loop.provider.chat = AsyncMock(side_effect=ContextWindowExceededError("too big"))
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}]  # session_id omitted
+        )
+
+        assert "context window" in final.lower()
+        loop.conversation.recover_from_overflow.assert_not_called()
+
+    async def test_recovery_attempts_capped(self) -> None:
+        """A buggy recover method that returns a still-too-big list on
+        every call must not loop forever. The loop caps attempts at
+        ``max_recovery_attempts`` (default 3) and gives up."""
+        from exoclaw.providers.types import ContextWindowExceededError
+
+        loop, _ = _make_loop(max_recovery_attempts=3)
+        loop.conversation.recover_from_overflow = AsyncMock(
+            return_value=[{"role": "user", "content": "still too big"}]
+        )
+        loop.provider.chat = AsyncMock(side_effect=ContextWindowExceededError("nope"))
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], session_id="sess:1"
+        )
+
+        assert "context window" in final.lower()
+        # Capped at 3 attempts (then loop gives up before a 4th try).
+        assert loop.conversation.recover_from_overflow.await_count == 3
+
+    def test_callback_constructor_emits_deprecation_warning(self) -> None:
+        """Constructing AgentLoop with ``on_context_overflow=`` set
+        emits a ``DeprecationWarning`` pointing the consumer at
+        ``Conversation.recover_from_overflow``."""
+        import warnings
+
+        async def callback(_: list[dict[str, object]]) -> None:
+            return None
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
+            _make_loop(on_context_overflow=callback)
+
+        deprecation = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert deprecation, "expected a DeprecationWarning when callback is set"
+        assert "recover_from_overflow" in str(deprecation[0].message)
+
+
+class TestExecutorRecoverFromOverflow:
+    """``DirectExecutor.recover_from_overflow`` is the default
+    forwarder — it calls the Conversation's optional method and
+    returns ``None`` cleanly when the Conversation hasn't opted in.
+    Durable executors (DBOS, Temporal) override to wrap the
+    forwarded call in a step / activity for replay safety.
+    """
+
+    async def test_forwards_to_conversation_when_present(self) -> None:
+        from exoclaw.executor import DirectExecutor
+
+        executor = DirectExecutor()
+        conversation = MagicMock()
+        conversation.recover_from_overflow = AsyncMock(
+            return_value=[{"role": "user", "content": "ok"}]
+        )
+
+        result = await executor.recover_from_overflow(conversation, "sess:1")
+
+        assert result == [{"role": "user", "content": "ok"}]
+        conversation.recover_from_overflow.assert_awaited_once_with("sess:1")
+
+    async def test_returns_none_when_conversation_lacks_method(self) -> None:
+        from exoclaw.executor import DirectExecutor
+
+        executor = DirectExecutor()
+        conversation = MagicMock(spec=["build_prompt", "record", "clear"])
+
+        result = await executor.recover_from_overflow(conversation, "sess:1")
+
+        assert result is None
+
+    async def test_returns_none_when_conversation_returns_non_list(self) -> None:
+        """Defensive: if a buggy Conversation returns something other
+        than a list (e.g. ``True`` instead of ``None``), treat it as
+        a give-up signal rather than passing garbage to ``set_messages``."""
+        from exoclaw.executor import DirectExecutor
+
+        executor = DirectExecutor()
+        conversation = MagicMock()
+        conversation.recover_from_overflow = AsyncMock(return_value=True)
+
+        result = await executor.recover_from_overflow(conversation, "sess:1")
+
+        assert result is None
+
+
 # ---------------------------------------------------------------------------
 # Executor.monotonic_ms (opt-in via getattr — same pattern as enqueue_inbound)
 # ---------------------------------------------------------------------------

@@ -47,6 +47,27 @@ def test_outbound_round_trip():
     _run(_go())
 
 
+def test_outbound_buttons_default_and_round_trip():
+    """Inline button rows for interactive callbacks (ask_user, message
+    tool). Default is empty list; explicit value survives the bus."""
+    plain = OutboundMessage(channel="x", chat_id="c", content="hi")
+    assert plain.buttons == [], "default buttons must be empty list"
+
+    bus = MessageBus()
+    rows = [["Yes", "No"], ["Maybe"]]
+
+    async def _go():
+        out = OutboundMessage(channel="slack", chat_id="c1", content="?", buttons=rows)
+        await bus.publish_outbound(out)
+        got = await bus.consume_outbound()
+        assert got.buttons == rows
+        # Per-instance mutability — defaults must not be shared.
+        plain.buttons.append(["leak"])
+        assert OutboundMessage(channel="x", chat_id="c", content="z").buttons == []
+
+    _run(_go())
+
+
 def test_inbound_hook_diverts_publish():
     """When ``set_inbound_hook`` is installed, ``publish_inbound``
     forwards to the hook instead of putting on the queue. Same

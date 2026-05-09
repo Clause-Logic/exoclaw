@@ -391,7 +391,7 @@ class AgentLoop:
                     )
                     break
                 recovery_attempts += 1
-                compacted: "list[dict[str, object]] | None" = None
+                compacted: list[dict[str, object]] | None = None
                 if self._on_context_overflow is not None:
                     # Deprecated callback path. Wins for back-compat when set
                     # — existing consumers keep working until they migrate to

@@ -645,7 +645,7 @@ class DirectExecutor:
         self,
         conversation: Conversation,
         session_id: str,
-    ) -> "list[dict[str, object]] | None":
+    ) -> list[dict[str, object]] | None:
         """Forward to ``conversation.recover_from_overflow`` if the
         Conversation opts into the recovery surface.
 

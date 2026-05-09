@@ -70,6 +70,26 @@ class Conversation(Protocol):
         """
         return set()
 
+    # NOTE: ``recover_from_overflow`` lives on concrete Conversation
+    # implementations as an optional method rather than on this Protocol.
+    # Same reasoning as ``Executor.set_prior_source`` and
+    # ``Executor.enqueue_inbound`` — keeping it off the Protocol avoids a
+    # breaking static-typing change for external Conversation impls that
+    # already conform structurally. When the provider raises
+    # ``ContextWindowExceededError``, the agent loop calls
+    # ``executor.recover_from_overflow(conversation, session_id)``;
+    # the executor's default implementation in turn forwards to
+    # ``getattr(conversation, "recover_from_overflow", None)``. Implementations
+    # that opt in should provide:
+    #
+    #     async def recover_from_overflow(
+    #         self, session_id: str
+    #     ) -> list[dict[str, object]] | None: ...
+    #
+    # Returning a new message list signals the loop to ``set_messages`` and
+    # retry the failed iteration; returning ``None`` signals "couldn't
+    # recover, surface the original error".
+
 
 @runtime_checkable
 class AppendableConversation(Conversation, Protocol):

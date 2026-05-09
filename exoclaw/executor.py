@@ -450,6 +450,24 @@ class Executor(Protocol):
     # that don't opt in. Callers (AgentLoop) guard the call with
     # ``getattr(..., "handles_inbound_enqueue", False)``.
 
+    # NOTE: ``recover_from_overflow`` lives on ``DirectExecutor`` as a
+    # concrete method rather than on this Protocol. Same reasoning as
+    # ``set_prior_source`` and ``enqueue_inbound`` above. The agent loop
+    # calls ``getattr(executor, "recover_from_overflow", None)`` from
+    # its ``ContextWindowExceededError`` handler. The default
+    # implementation forwards to ``conversation.recover_from_overflow``
+    # (if the conversation opts in); durable executors override to wrap
+    # the call in a step/activity for replay safety. Signature:
+    #
+    #     async def recover_from_overflow(
+    #         self,
+    #         conversation: Conversation,
+    #         session_id: str,
+    #     ) -> list[dict[str, object]] | None: ...
+    #
+    # Returning a new message list signals the loop to ``set_messages``
+    # and retry the failed iteration; ``None`` signals "couldn't recover".
+
     async def mint_turn_id(self) -> str:
         """Produce a replay-safe unique id for one turn.
 
@@ -622,6 +640,30 @@ class DirectExecutor:
         """
         self._prior_var.set(source)
         self._delta_var.set([])
+
+    async def recover_from_overflow(
+        self,
+        conversation: Conversation,
+        session_id: str,
+    ) -> list[dict[str, object]] | None:
+        """Forward to ``conversation.recover_from_overflow`` if the
+        Conversation opts into the recovery surface.
+
+        ``DirectExecutor``'s implementation is a thin pass-through —
+        durable executors (DBOS, Temporal) override to wrap the
+        forwarded call in a step / activity so a crash mid-recovery
+        replays correctly.
+
+        Returns the new message list (caller passes to
+        ``set_messages``), or ``None`` when the conversation either
+        doesn't opt in or can't recover. The agent loop treats ``None``
+        as "give up — surface the original ``ContextWindowExceededError``".
+        """
+        recover = getattr(conversation, "recover_from_overflow", None)
+        if recover is None:
+            return None
+        result = await recover(session_id)
+        return result if isinstance(result, list) else None
 
     async def chat(
         self,

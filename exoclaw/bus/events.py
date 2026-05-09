@@ -48,6 +48,12 @@ if not IS_MICROPYTHON:  # pragma: no cover (micropython)
         reply_to: str | None = None
         media: list[str] = field(default_factory=list)
         metadata: dict[str, object] = field(default_factory=dict)
+        # Inline button rows for interactive callbacks (ask_user, message
+        # tool). Each inner list is one row of button labels. Channel
+        # implementations render to their native primitive — Slack
+        # Block Kit actions, Telegram InlineKeyboardMarkup, etc.
+        # Empty list = plain text message.
+        buttons: list[list[str]] = field(default_factory=list)
 
 else:  # pragma: no cover (cpython)
 
@@ -95,6 +101,7 @@ else:  # pragma: no cover (cpython)
             reply_to: str | None = None,
             media: list[str] | None = None,
             metadata: dict[str, object] | None = None,
+            buttons: list[list[str]] | None = None,
         ) -> None:
             self.channel = channel
             self.chat_id = chat_id
@@ -102,3 +109,6 @@ else:  # pragma: no cover (cpython)
             self.reply_to = reply_to
             self.media = media if media is not None else []
             self.metadata = metadata if metadata is not None else {}
+            # Inline button rows for interactive callbacks. See CPython
+            # variant above for full notes.
+            self.buttons = buttons if buttons is not None else []

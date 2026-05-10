@@ -23,7 +23,7 @@ pip install exoclaw-nanobot
 exoclaw-nanobot
 ```
 
-That bundles everything — provider, conversation, channels, tools — and gives you a working agent. The full plugin catalog lives at [exoclaw-plugins](https://github.com/Clause-Logic/exoclaw-plugins).
+That bundles a sensible default stack — provider, conversation, tools, and an interactive CLI channel — into a working agent you can talk to in the terminal. The full plugin catalog (Slack, Telegram, Discord, Matrix, … and many more tools) lives at [exoclaw-plugins](https://github.com/Clause-Logic/exoclaw-plugins).
 
 This repo is the protocol-only core that everything else builds on. Read on if you want to wire it into something you already have.
 

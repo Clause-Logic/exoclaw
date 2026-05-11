@@ -233,12 +233,12 @@ Plugins haven't been ported yet — bring your own LLM provider and lightweight 
 
 ## Where this package lives
 
-`exoclaw` dual-publishes to:
+`exoclaw` is published to:
 
 1. **PyPI** — the default `pip install exoclaw` source.
-2. **[clause-logic.github.io/registry](https://clause-logic.github.io/registry/)** — our self-hosted PEP 503 index. Authoritative; always in sync with the latest release, even when PyPI's [new-project creation rate limit](https://github.com/pypi/support/issues/10572) delays a mirror update.
+2. **[clause-logic.github.io/registry](https://clause-logic.github.io/registry/)** — our self-hosted PEP 503 index. Each release lands on both within the same workflow run; the registry is useful as a fallback when PyPI's [new-project creation rate limit](https://github.com/pypi/support/issues/10572) holds up a first-time publish.
 
-PyPI is fine for most users. To pin against the registry instead, add to your project's `pyproject.toml`:
+PyPI is fine for most users. To prefer the registry, add to your project's `pyproject.toml`:
 
 ```toml
 [[tool.uv.index]]
@@ -246,7 +246,7 @@ name = "clause-logic"
 url = "https://clause-logic.github.io/registry/pypi/simple/"
 ```
 
-That's the whole config — uv checks clause-logic first for every package and falls through to PyPI for anything not there.
+uv checks clause-logic first for every package and falls through to PyPI for anything not there. (Transitive deps like `structlog` still come from PyPI.)
 
 Pip users: `pip install --extra-index-url https://clause-logic.github.io/registry/pypi/simple/ exoclaw`.
 

@@ -4,6 +4,9 @@ on:
   push:
     tags: ['v*']
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -59,15 +62,19 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Create GitHub release with wheels
+      - name: Create or update GitHub release with wheels
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --notes "Release ${GITHUB_REF_NAME}. Wheels are surfaced through the [Clause-Logic registry](https://clause-logic.github.io/registry/pypi/simple/) for uv consumers and via PyPI for everyone else." \
-            dist/*
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --notes "Release ${GITHUB_REF_NAME}. Wheels are surfaced through the [Clause-Logic registry](https://clause-logic.github.io/registry/pypi/simple/) for uv consumers and via PyPI for everyone else." \
+              dist/*
+          fi
 
       - uses: actions/create-github-app-token@v1
         id: app-token

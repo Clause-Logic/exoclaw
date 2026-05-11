@@ -244,10 +244,9 @@ PyPI is fine for most users. To pin against the registry instead, add to your pr
 [[tool.uv.index]]
 name = "clause-logic"
 url = "https://clause-logic.github.io/registry/pypi/simple/"
-
-[tool.uv.sources]
-exoclaw = { index = "clause-logic" }
 ```
+
+That's the whole config — uv checks clause-logic first for every package and falls through to PyPI for anything not there.
 
 Pip users: `pip install --extra-index-url https://clause-logic.github.io/registry/pypi/simple/ exoclaw`.
 

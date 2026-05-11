@@ -5,10 +5,8 @@ on:
     tags: ['v*']
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
-    environment: pypi
-
     steps:
       - uses: actions/checkout@v4
 
@@ -29,5 +27,57 @@ jobs:
       - name: Build
         run: uv build
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: astral-sh/setup-uv@v6
+
       - name: Publish to PyPI
         run: uv publish --token ${{ secrets.PYPI_TOKEN }}
+
+  registry:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: registry
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub release with wheels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Release ${GITHUB_REF_NAME}. Wheels are surfaced through the [Clause-Logic registry](https://clause-logic.github.io/registry/pypi/simple/) for uv consumers and via PyPI for everyone else." \
+            dist/*
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+          owner: Clause-Logic
+          repositories: registry
+
+      - name: Trigger registry rebuild
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh api repos/Clause-Logic/registry/dispatches -f event_type=rebuild

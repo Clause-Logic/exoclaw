@@ -115,10 +115,14 @@ class AgentLoop:
         if on_context_overflow is not None and _warnings is not None:
             _warnings.warn(  # pragma: no cover (micropython)
                 "AgentLoop(on_context_overflow=...) is deprecated; implement "
-                "Conversation.recover_from_overflow instead. The callback "
-                "operates on raw message lists and bypasses any conversation-"
-                "side state (e.g. the consolidation policy's sidecar), which "
-                "can desynchronise the persisted view from what the LLM saw.",
+                "Executor.recover_from_overflow(conversation, session_id) "
+                "instead (which typically forwards to "
+                "Conversation.recover_from_overflow, wrapping in a durability "
+                "primitive when the executor needs replay safety). The "
+                "callback operates on raw message lists and bypasses any "
+                "conversation-side state (e.g. the consolidation policy's "
+                "sidecar), which can desynchronise the persisted view from "
+                "what the LLM saw.",
                 DeprecationWarning,
                 stacklevel=2,
             )

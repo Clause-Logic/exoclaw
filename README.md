@@ -29,6 +29,12 @@ This repo is the protocol-only core that everything else builds on. Read on if y
 
 ---
 
+## Go port
+
+A Go implementation lives at [exoclaw-go](https://github.com/Clause-Logic/exoclaw-go). This Python repo is the **reference implementation**; exoclaw-go is **forward-ported periodically** from tagged Python releases (file-by-file, with a parity table pinning each Go module to the Python version it tracks). Use Python if you want the freshest features; use Go if your stack is Go and you're willing to lag behind by a release or two.
+
+---
+
 ## Why exoclaw exists
 
 exoclaw is a fork of [nanobot](https://github.com/NanobotAI/nanobot), stripped down to the agent loop and the protocols around it.

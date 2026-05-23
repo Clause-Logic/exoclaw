@@ -956,9 +956,7 @@ def test_on_before_finish_injects_then_ends():
         bus = MessageBus()
         loop = AgentLoop(
             bus=bus,
-            provider=_StubProvider(
-                [LLMResponse(content="partial"), LLMResponse(content="done")]
-            ),
+            provider=_StubProvider([LLMResponse(content="partial"), LLMResponse(content="done")]),
             conversation=_MemConv(),
             on_before_finish=on_before_finish,
         )

@@ -604,9 +604,7 @@ class AgentLoop:
                     # is only set by ``_process_message`` and is unset/stale on the
                     # system-message and durable ``run_turn`` paths, so it's the
                     # fallback, not the source of truth.
-                    sk = session_id or (
-                        self._current_ctx.session_key if self._current_ctx else ""
-                    )
+                    sk = session_id or (self._current_ctx.session_key if self._current_ctx else "")
                     followup = await self._executor.run_hook(
                         self._on_before_finish, clean or "", list(tools_used), sk
                     )

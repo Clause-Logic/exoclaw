@@ -599,7 +599,14 @@ class AgentLoop:
                 # store) and the loop continues; None/empty ends the turn. The
                 # host owns the stopping condition; ``max_iterations`` backstops.
                 if self._on_before_finish:
-                    sk = self._current_ctx.session_key if self._current_ctx else ""
+                    # Prefer the loop's own ``session_id`` — it's set on every
+                    # real path (``_process_turn_inline`` passes it). ``_current_ctx``
+                    # is only set by ``_process_message`` and is unset/stale on the
+                    # system-message and durable ``run_turn`` paths, so it's the
+                    # fallback, not the source of truth.
+                    sk = session_id or (
+                        self._current_ctx.session_key if self._current_ctx else ""
+                    )
                     followup = await self._executor.run_hook(
                         self._on_before_finish, clean or "", list(tools_used), sk
                     )

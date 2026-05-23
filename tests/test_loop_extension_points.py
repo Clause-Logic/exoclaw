@@ -361,6 +361,148 @@ class TestOnMaxIterations:
 
 
 # ---------------------------------------------------------------------------
+# on_before_finish callback — re-prompt a model that stopped early
+# ---------------------------------------------------------------------------
+
+
+class TestOnBeforeFinish:
+    async def test_returns_message_injects_and_continues(self) -> None:
+        """A non-empty return is appended as a user turn and the model is
+        re-prompted in place; the turn ends with the post-nudge response, and
+        the nudge actually reached the conversation the provider sees."""
+        first = _make_response(content="partial", finish_reason="stop")
+        second = _make_response(content="now complete", finish_reason="stop")
+
+        seen_messages: list[list[dict[str, object]]] = []
+
+        async def spy_chat(*args: object, **kwargs: object) -> MagicMock:
+            seen_messages.append(list(kwargs.get("messages", [])))  # type: ignore[arg-type]
+            return first if len(seen_messages) == 1 else second
+
+        calls: list[tuple[str, list[str], str]] = []
+
+        async def on_before_finish(final: str, tools_used: list[str], sk: str) -> str | None:
+            calls.append((final, list(tools_used), sk))
+            return "you stopped early — keep going" if len(calls) == 1 else None
+
+        loop, _ = _make_loop(on_before_finish=on_before_finish)
+        loop.provider.chat = AsyncMock(side_effect=spy_chat)
+
+        final, _, messages = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], session_id="cli:main"
+        )
+
+        assert final == "now complete"
+        assert loop.provider.chat.await_count == 2
+        # Hook fired on the first (early) stop, then on the second (real) stop.
+        assert [c[0] for c in calls] == ["partial", "now complete"]
+        # The nudge landed as a user turn in the message list the loop returns…
+        assert {"role": "user", "content": "you stopped early — keep going"} in messages
+        # …and was actually visible to the model on the second call (not just
+        # buffered somewhere the provider never reads).
+        assert any(m.get("content") == "you stopped early — keep going" for m in seen_messages[1])
+
+    async def test_returns_none_ends_turn(self) -> None:
+        """Returning None (the host is satisfied) ends the turn normally with
+        the model's content — no extra iteration."""
+        resp = _make_response(content="all done", finish_reason="stop")
+
+        async def on_before_finish(final: str, tools_used: list[str], sk: str) -> str | None:
+            return None
+
+        loop, _ = _make_loop(on_before_finish=on_before_finish)
+        loop.provider.chat = AsyncMock(return_value=resp)
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], session_id="cli:main"
+        )
+
+        assert final == "all done"
+        assert loop.provider.chat.await_count == 1
+
+    async def test_hook_sees_tools_used_for_completion_check(self) -> None:
+        """The core use case: the host inspects ``tools_used`` to decide whether
+        a required closing tool was called. The hook must see the tool the model
+        invoked this turn, with the live session_key, via the full
+        _process_message path."""
+        tool_resp = _make_response(has_tool_calls=True)
+        tool_resp.tool_calls = [_make_tool_call("record_thread")]
+        final_resp = _make_response(content="done", finish_reason="stop")
+
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        provider.chat = AsyncMock(side_effect=[tool_resp, final_resp])
+
+        conversation = MagicMock()
+        conversation.build_prompt = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
+        conversation.record = AsyncMock()
+
+        tool = MagicMock(
+            spec=["name", "description", "parameters", "execute", "cast_params", "validate_params"]
+        )
+        tool.name = "record_thread"
+        tool.description = "records a thread"
+        tool.parameters = {"type": "object", "properties": {}}
+        tool.cast_params = MagicMock(side_effect=lambda p: p)
+        tool.validate_params = MagicMock(return_value=[])
+        tool.execute = AsyncMock(return_value="ok")
+
+        captured: dict[str, object] = {}
+
+        async def on_before_finish(final: str, tools_used: list[str], sk: str) -> str | None:
+            captured["tools_used"] = list(tools_used)
+            captured["session_key"] = sk
+            return None  # satisfied — record_thread was called
+
+        bus = MessageBus()
+        loop = AgentLoop(
+            bus=bus,
+            provider=provider,
+            conversation=conversation,
+            tools=[tool],
+            on_before_finish=on_before_finish,
+        )
+
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="main", content="go")
+        await loop._process_message(msg)
+
+        assert captured["tools_used"] == ["record_thread"]
+        assert captured["session_key"] == "cli:main"
+
+    async def test_not_called_on_error_finish(self) -> None:
+        """An error stop short-circuits before the hook — the host should never
+        be asked to re-prompt a turn the model errored out of."""
+        err = _make_response(content="boom", finish_reason="error")
+        on_before_finish = AsyncMock(return_value="retry")
+
+        loop, _ = _make_loop(on_before_finish=on_before_finish)
+        loop.provider.chat = AsyncMock(return_value=err)
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], session_id="cli:main"
+        )
+
+        on_before_finish.assert_not_called()
+        assert final == "boom"
+
+    async def test_max_iterations_backstops_a_hook_that_never_stops(self) -> None:
+        """A buggy/greedy host that always returns a follow-up must not loop
+        forever — ``max_iterations`` is the hard backstop."""
+        resp = _make_response(content="still not done", finish_reason="stop")
+        on_before_finish = AsyncMock(return_value="go again")
+
+        loop, _ = _make_loop(max_iterations=3, on_before_finish=on_before_finish)
+        loop.provider.chat = AsyncMock(return_value=resp)
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], session_id="cli:main"
+        )
+
+        assert loop.provider.chat.await_count == 3
+        assert "maximum" in final.lower()
+
+
+# ---------------------------------------------------------------------------
 # IterationPolicy — pluggable termination strategy
 # ---------------------------------------------------------------------------
 

@@ -937,3 +937,32 @@ def test_llm_error_finish_reason_short_circuits():
         assert "quota" in (content or "").lower() or "error" in (content or "").lower()
 
     asyncio.run(_go())
+
+
+def test_on_before_finish_injects_then_ends():
+    """``on_before_finish`` returning a follow-up re-prompts the model in
+    place (loop continues); returning None ends the turn. Covers the
+    no-tool-calls before-finish branch in ``_run_agent_loop`` — both the
+    inject-and-continue path and the satisfied/end path."""
+
+    async def _go():
+        seen = []
+
+        async def on_before_finish(final, tools_used, session_key):
+            seen.append(final)
+            # Nudge once, then accept.
+            return "keep going" if len(seen) == 1 else None
+
+        bus = MessageBus()
+        loop = AgentLoop(
+            bus=bus,
+            provider=_StubProvider([LLMResponse(content="partial"), LLMResponse(content="done")]),
+            conversation=_MemConv(),
+            on_before_finish=on_before_finish,
+        )
+        content, _ = await loop.process_turn("s", "go")
+        # First stop nudged → loop continued; ended on the second response.
+        assert content == "done"
+        assert seen == ["partial", "done"]
+
+    asyncio.run(_go())

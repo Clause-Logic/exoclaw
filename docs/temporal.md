@@ -17,7 +17,7 @@ The five exoclaw protocols map cleanly to Temporal primitives. The `Executor` pr
 ## What survives unchanged
 
 - `LLMProvider`, `Conversation`, `Tool`, `Channel`, `Bus` — **all untouched**. No protocol changes, no signature changes.
-- Hook callbacks (`on_pre_context`, `on_pre_tool`, `on_post_turn`, `on_max_iterations`) — already shaped like activities. No changes.
+- Hook callbacks (`on_pre_context`, `on_pre_tool`, `on_post_turn`, `on_max_iterations`, `on_before_finish`) — already shaped like activities (dispatched via `executor.run_hook`). No changes. `on_before_finish` re-injects its follow-up through the same `append_message` path every other message uses, so it inherits the executor's durability with no special handling.
 - `system_context()` on tools — sync, called in workflow code before `build_prompt`. No changes.
 - Conversation JSONL storage — unchanged, just called via an activity.
 - Subagents (`exoclaw-tools-spawn`) — map to Temporal child workflows (see below).

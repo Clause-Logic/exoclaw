@@ -76,6 +76,19 @@ class AgentLoop:
         on_tool_calls: Callable[["list[ToolCallRequest]"], Awaitable[None]] | None = None,
         # Called after each tool result (tool_call, result) — for streaming previews.
         on_tool_result: Callable[["ToolCallRequest", str], Awaitable[None]] | None = None,
+        # Called when the model returns a final (no-tool-call) response, just
+        # before the loop ends. Receives ``(final_content, tools_used,
+        # session_key)`` and returns an optional follow-up message: a non-empty
+        # return is appended as a user turn and the loop continues (the model
+        # gets another turn); ``None``/empty ends the turn as usual. Lets a host
+        # enforce a completion condition the model can't be trusted to honour on
+        # its own — e.g. a required closing tool that wasn't called — by
+        # re-prompting in place rather than ending early. The host owns the
+        # stopping condition (it MUST eventually return ``None``);
+        # ``max_iterations`` is the hard backstop against a hook that never
+        # stops. Dispatched through ``executor.run_hook`` like the other
+        # callbacks, so durable executors wrap it for replay safety.
+        on_before_finish: Callable[[str, list[str], str], Awaitable[str | None]] | None = None,
         # DEPRECATED — prefer ``Conversation.recover_from_overflow`` (forwarded
         # via ``Executor.recover_from_overflow``). When set, this callback is
         # tried first on ``ContextWindowExceededError`` for back-compat; new
@@ -111,6 +124,7 @@ class AgentLoop:
         self._on_max_iterations = on_max_iterations
         self._on_tool_calls = on_tool_calls
         self._on_tool_result = on_tool_result
+        self._on_before_finish = on_before_finish
         self._on_context_overflow = on_context_overflow
         if on_context_overflow is not None and _warnings is not None:
             _warnings.warn(  # pragma: no cover (micropython)
@@ -576,6 +590,30 @@ class AgentLoop:
                     msg2["thinking_blocks"] = response.thinking_blocks
                 self._executor.append_messages([msg2])
                 await _flush(msg2)
+                # Before-finish hook: the model stopped (no tool calls). A host
+                # may decide the turn isn't really done — e.g. a required
+                # closing tool wasn't called — and return a follow-up message to
+                # re-drive the loop in place. A non-empty return is appended as a
+                # user turn (same path as every other message, so it reaches
+                # both the in-memory buffer the provider reads and the durable
+                # store) and the loop continues; None/empty ends the turn. The
+                # host owns the stopping condition; ``max_iterations`` backstops.
+                if self._on_before_finish:
+                    # Prefer the loop's own ``session_id`` — it's set on every
+                    # real path (``_process_turn_inline`` passes it). ``_current_ctx``
+                    # is only set by ``_process_message`` and is unset/stale on the
+                    # system-message and durable ``run_turn`` paths, so it's the
+                    # fallback, not the source of truth.
+                    sk = session_id or (self._current_ctx.session_key if self._current_ctx else "")
+                    followup = await self._executor.run_hook(
+                        self._on_before_finish, clean or "", list(tools_used), sk
+                    )
+                    if followup:
+                        nudge: dict[str, object] = {"role": "user", "content": str(followup)}
+                        self._executor.append_messages([nudge])
+                        await _flush(nudge)
+                        self._log.info("turn_continue", reason="before_finish")
+                        continue
                 final_content = clean
                 break
 

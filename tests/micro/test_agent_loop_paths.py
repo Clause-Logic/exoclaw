@@ -1044,12 +1044,12 @@ def test_skill_before_tool_hook_stamps_and_runs_effect():
             p["cycle_id"] = ctx.run_context.get("cycle_id")
             return BeforeToolResult(params=p)
 
-        conv = _HookConv(
-            hooks={BEFORE_TOOL: [HookRegistration(stamp)]}, run_ctx={"cycle_id": "C1"}
-        )
+        conv = _HookConv(hooks={BEFORE_TOOL: [HookRegistration(stamp)]}, run_ctx={"cycle_id": "C1"})
         loop = AgentLoop(
             bus=MessageBus(),
-            provider=_StubProvider([_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]),
+            provider=_StubProvider(
+                [_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]
+            ),
             conversation=conv,
             tools=[tool],
         )
@@ -1140,7 +1140,9 @@ def test_skill_throwing_active_hooks_is_noop():
         tool = _RecTool()
         loop = AgentLoop(
             bus=MessageBus(),
-            provider=_StubProvider([_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]),
+            provider=_StubProvider(
+                [_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]
+            ),
             conversation=_ThrowingHookConv(raise_active=True),
             tools=[tool],
         )
@@ -1156,7 +1158,9 @@ def test_skill_throwing_run_context_is_noop():
         tool = _RecTool()
         loop = AgentLoop(
             bus=MessageBus(),
-            provider=_StubProvider([_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]),
+            provider=_StubProvider(
+                [_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]
+            ),
             conversation=_ThrowingHookConv(raise_active=False),
             tools=[tool],
         )

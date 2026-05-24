@@ -1,13 +1,13 @@
 """Tests for the generic lifecycle-hook contract (exoclaw.agent.hooks) and its
 wiring into AgentLoop.
 
-Core is agnostic about what produces hooks: the loop only consults
-``Conversation.active_hooks(event)``. These tests use a stub conversation that
-returns hooks conditionally, proving the loop fires them, applies
-mutate/veto/inject, exposes ``run_context`` + ``run_effect``, and that an
-absent/empty ``active_hooks`` fires nothing (so existing conversations are
-unaffected). What decides activation belongs to the consumer and is tested
-there.
+Core asks the Conversation for one decision per seam (``before_tool`` /
+``before_finish``) and applies it — it has no opinion on what produces that
+decision or how multiple hooks compose into it (that lives in the consumer).
+These tests use a stub conversation that returns a single decision directly,
+proving the loop applies mutate/veto/inject, exposes ``run_context`` +
+``run_effect``, and that an absent/raising decider is a no-op (so existing
+conversations are unaffected and a buggy consumer can't take down a turn).
 """
 
 from __future__ import annotations
@@ -17,121 +17,18 @@ from typing import Awaitable, Callable
 
 from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.hooks import (
-    BEFORE_FINISH,
-    BEFORE_TOOL,
     BeforeFinishResult,
     BeforeToolResult,
     HookContext,
-    HookRegistration,
-    dispatch_before_finish,
-    dispatch_before_tool,
     passthrough_effect,
 )
 from exoclaw.agent.loop import AgentLoop
 from exoclaw.bus.queue import MessageBus
 from exoclaw.providers.types import LLMResponse, ToolCallRequest
 
-Effect = Callable[..., Awaitable[object]]
-
-
-async def _noop_effect(fn: Effect, *a: object, **kw: object) -> object:
-    return await fn(*a, **kw)
-
-
-def _ctx(event: str, **fields: object) -> HookContext:
-    return HookContext(event=event, run_context={}, messages=[], run_effect=_noop_effect, **fields)
-
-
-# ---------------------------------------------------------------------------
-# Pure dispatcher semantics
-# ---------------------------------------------------------------------------
-
-
-def test_before_tool_mutations_compose_in_priority_order() -> None:
-    """Higher priority runs first; each lower hook sees the args as mutated by
-    the higher ones (true middleware composition)."""
-
-    async def go() -> None:
-        seen: list[tuple[str, dict[str, object]]] = []
-
-        async def low(ctx: HookContext) -> BeforeToolResult:
-            seen.append(("low", dict(ctx.params or {})))
-            p = dict(ctx.params or {})
-            p["low"] = 1
-            return BeforeToolResult(params=p)
-
-        async def high(ctx: HookContext) -> BeforeToolResult:
-            seen.append(("high", dict(ctx.params or {})))
-            p = dict(ctx.params or {})
-            p["high"] = 1
-            return BeforeToolResult(params=p)
-
-        regs = [HookRegistration(low, priority=1), HookRegistration(high, priority=10)]
-        res = await dispatch_before_tool(regs, _ctx(BEFORE_TOOL, params={"orig": 1}))
-
-        assert [s[0] for s in seen] == ["high", "low"]  # priority order
-        assert seen[1][1] == {"orig": 1, "high": 1}  # low saw high's mutation
-        assert res.params == {"orig": 1, "high": 1, "low": 1}
-
-    asyncio.run(go())
-
-
-def test_before_tool_first_block_short_circuits() -> None:
-    async def go() -> None:
-        ran: list[str] = []
-
-        async def blocker(ctx: HookContext) -> BeforeToolResult:
-            return BeforeToolResult(block=True, block_reason="budget spent")
-
-        async def after(ctx: HookContext) -> BeforeToolResult | None:
-            ran.append("after")
-            return None
-
-        regs = [HookRegistration(blocker, priority=10), HookRegistration(after, priority=1)]
-        res = await dispatch_before_tool(regs, _ctx(BEFORE_TOOL, params={}))
-
-        assert res.block and res.block_reason == "budget spent"
-        assert ran == []  # lower-priority hook never ran
-
-    asyncio.run(go())
-
-
-def test_passthrough_effect_runs_inline() -> None:
-    """The default run_effect (for executors without one) just awaits the
-    callable inline."""
-
-    async def go() -> None:
-        ran: list[int] = []
-
-        async def eff(x: int) -> int:
-            ran.append(x)
-            return x * 2
-
-        out = await passthrough_effect(eff, 21)
-        assert out == 42
-        assert ran == [21]
-
-    asyncio.run(go())
-
-
-def test_before_finish_highest_priority_nonempty_wins() -> None:
-    async def go() -> None:
-        async def low(ctx: HookContext) -> BeforeFinishResult:
-            return BeforeFinishResult(continue_message="low")
-
-        async def high(ctx: HookContext) -> BeforeFinishResult:
-            return BeforeFinishResult(continue_message="high")
-
-        regs = [HookRegistration(low, priority=1), HookRegistration(high, priority=10)]
-        res = await dispatch_before_finish(regs, _ctx(BEFORE_FINISH))
-        assert res.continue_message == "high"
-
-    asyncio.run(go())
-
-
-# ---------------------------------------------------------------------------
-# Loop integration via a stub conversation
-# ---------------------------------------------------------------------------
+# A decider: takes the HookContext, returns a decision (or None).
+BeforeTool = Callable[[HookContext], Awaitable["BeforeToolResult | None"]]
+BeforeFinish = Callable[[HookContext], Awaitable["BeforeFinishResult | None"]]
 
 
 class _Provider:
@@ -152,23 +49,25 @@ class _Provider:
 
 
 class _Conv:
-    """Just returns whatever active_hooks/run_context it was handed — stands in
-    for a consumer that opts into hooks, without core knowing what's behind it."""
+    """Stub conversation that delegates the decider seams to the callables it
+    was handed — stands in for a consumer that opts into hooks, without core
+    knowing what's behind it (or how it composes multiple hooks)."""
 
     def __init__(
         self,
-        hooks: dict[str, list[HookRegistration]] | None = None,
+        before_tool: BeforeTool | None = None,
+        before_finish: BeforeFinish | None = None,
         run_ctx: dict[str, object] | None = None,
     ) -> None:
-        self._hooks = hooks or {}
+        self._bt = before_tool
+        self._bf = before_finish
         self._run_ctx = run_ctx or {}
-        self.recorded: list[dict[str, object]] = []
 
     async def build_prompt(self, sid: str, message: str, **kw: object) -> list[dict[str, object]]:
         return [{"role": "user", "content": message}]
 
     async def record(self, sid: str, msgs: list[dict[str, object]]) -> None:
-        self.recorded.extend(msgs)
+        pass
 
     async def clear(self, sid: str) -> bool:
         return True
@@ -176,11 +75,14 @@ class _Conv:
     def list_sessions(self) -> list[dict[str, object]]:
         return []
 
-    def active_hooks(self, event: str) -> list[HookRegistration]:
-        return self._hooks.get(event, [])
-
     def run_context(self) -> dict[str, object]:
         return self._run_ctx
+
+    async def before_tool(self, ctx: HookContext) -> BeforeToolResult | None:
+        return await self._bt(ctx) if self._bt else None
+
+    async def before_finish(self, ctx: HookContext) -> BeforeFinishResult | None:
+        return await self._bf(ctx) if self._bf else None
 
 
 class _RecordingTool:
@@ -205,11 +107,29 @@ def _tool_call(name: str = "do", args: dict[str, object] | None = None) -> LLMRe
     )
 
 
-def test_loop_before_tool_hook_stamps_from_run_context() -> None:
-    """A before_tool hook reads the authoritative cycle id from run_context and
-    stamps it onto the tool args — the tool runs with the stamped args, not
+def test_passthrough_effect_runs_inline() -> None:
+    """The default run_effect (for executors without one) just awaits the
+    callable inline."""
+
+    async def go() -> None:
+        ran: list[int] = []
+
+        async def eff(x: int) -> int:
+            ran.append(x)
+            return x * 2
+
+        out = await passthrough_effect(eff, 21)
+        assert out == 42
+        assert ran == [21]
+
+    asyncio.run(go())
+
+
+def test_loop_before_tool_decider_stamps_from_run_context() -> None:
+    """A before_tool decider reads the authoritative cycle id from run_context
+    and stamps it onto the tool args — the tool runs with the stamped args, not
     whatever the model passed. The cycle_id-stamping pattern, with zero loop
-    knowledge of research."""
+    knowledge of the consumer."""
 
     async def go() -> None:
         tool = _RecordingTool()
@@ -219,10 +139,7 @@ def test_loop_before_tool_hook_stamps_from_run_context() -> None:
             p["cycle_id"] = ctx.run_context.get("cycle_id")
             return BeforeToolResult(params=p)
 
-        conv = _Conv(
-            hooks={BEFORE_TOOL: [HookRegistration(stamp)]},
-            run_ctx={"cycle_id": "C1"},
-        )
+        conv = _Conv(before_tool=stamp, run_ctx={"cycle_id": "C1"})
         loop = AgentLoop(
             bus=MessageBus(),
             provider=_Provider([_tool_call(args={"q": "x"}), LLMResponse(content="final")]),
@@ -237,7 +154,7 @@ def test_loop_before_tool_hook_stamps_from_run_context() -> None:
     asyncio.run(go())
 
 
-def test_loop_before_tool_hook_vetoes_call() -> None:
+def test_loop_before_tool_decider_vetoes_call() -> None:
     """block=True refuses the tool; the model sees block_reason as the result
     and the tool never runs."""
 
@@ -247,7 +164,7 @@ def test_loop_before_tool_hook_vetoes_call() -> None:
         async def veto(ctx: HookContext) -> BeforeToolResult:
             return BeforeToolResult(block=True, block_reason="budget spent — write up findings")
 
-        conv = _Conv(hooks={BEFORE_TOOL: [HookRegistration(veto)]})
+        conv = _Conv(before_tool=veto)
         loop = AgentLoop(
             bus=MessageBus(),
             provider=_Provider([_tool_call(name="web_search"), LLMResponse(content="final")]),
@@ -261,9 +178,9 @@ def test_loop_before_tool_hook_vetoes_call() -> None:
     asyncio.run(go())
 
 
-def test_loop_before_finish_hook_injects_and_continues() -> None:
-    """A before_finish hook re-prompts a model that stopped without a required
-    tool; the loop continues and ends on the next response."""
+def test_loop_before_finish_decider_injects_and_continues() -> None:
+    """A before_finish decider re-prompts a model that stopped without a
+    required tool; the loop continues and ends on the next response."""
 
     async def go() -> None:
         seen: list[list[str]] = []
@@ -274,7 +191,7 @@ def test_loop_before_finish_hook_injects_and_continues() -> None:
                 continue_message="call finish first" if len(seen) == 1 else None
             )
 
-        conv = _Conv(hooks={BEFORE_FINISH: [HookRegistration(nudge)]})
+        conv = _Conv(before_finish=nudge)
         loop = AgentLoop(
             bus=MessageBus(),
             provider=_Provider([LLMResponse(content="partial"), LLMResponse(content="done")]),
@@ -287,8 +204,8 @@ def test_loop_before_finish_hook_injects_and_continues() -> None:
     asyncio.run(go())
 
 
-def test_loop_before_tool_hook_can_run_effect() -> None:
-    """A hook can dispatch a side effect through HookContext.run_effect (the
+def test_loop_before_tool_decider_can_run_effect() -> None:
+    """A decider can dispatch a side effect through HookContext.run_effect (the
     executor-backed seam durable executors journal). On DirectExecutor it runs
     inline."""
 
@@ -302,7 +219,7 @@ def test_loop_before_tool_hook_can_run_effect() -> None:
             await ctx.run_effect(_record)
             return None
 
-        conv = _Conv(hooks={BEFORE_TOOL: [HookRegistration(effectful)]})
+        conv = _Conv(before_tool=effectful)
         loop = AgentLoop(
             bus=MessageBus(),
             provider=_Provider([_tool_call(), LLMResponse(content="final")]),
@@ -315,9 +232,9 @@ def test_loop_before_tool_hook_can_run_effect() -> None:
     asyncio.run(go())
 
 
-def test_loop_fires_nothing_when_conversation_has_no_active_hooks() -> None:
-    """A conversation without active_hooks (the common case) is unaffected — no
-    hooks fire, the tool runs with the model's args unchanged."""
+def test_loop_fires_nothing_when_conversation_has_no_deciders() -> None:
+    """A conversation without before_tool/before_finish (the common case) is
+    unaffected — no decision fires, the tool runs with the model's args."""
 
     async def go() -> None:
         class _Bare:
@@ -345,14 +262,14 @@ def test_loop_fires_nothing_when_conversation_has_no_active_hooks() -> None:
         out = await loop.process_direct("go")
         assert out == "final"
         assert tool.executed
-        assert tool.received == {"q": "x"}  # unstamped — no hooks
+        assert tool.received == {"q": "x"}  # unstamped — no decider
 
     asyncio.run(go())
 
 
-def test_conversation_protocol_hook_seams_default_empty() -> None:
-    """The optional active_tools/active_hooks/run_context default to empty, so a
-    conversation that doesn't override them contributes nothing."""
+def test_conversation_protocol_decider_seams_default_none() -> None:
+    """The optional decider seams (and active_tools/run_context) default to
+    no-op, so a conversation that doesn't override them contributes nothing."""
 
     class _Default(Conversation):
         async def build_prompt(
@@ -369,18 +286,25 @@ def test_conversation_protocol_hook_seams_default_empty() -> None:
         def list_sessions(self) -> list[dict[str, object]]:
             return []
 
-    c = _Default()
-    assert c.active_tools() == set()
-    assert c.active_hooks(BEFORE_TOOL) == []
-    assert c.run_context() == {}
+    async def go() -> None:
+        c = _Default()
+        ctx = HookContext(
+            event="before_tool", run_context={}, messages=[], run_effect=passthrough_effect
+        )
+        assert c.active_tools() == set()
+        assert await c.before_tool(ctx) is None
+        assert await c.before_finish(ctx) is None
+        assert c.run_context() == {}
+
+    asyncio.run(go())
 
 
-class _ThrowingHooks:
-    """Stub whose hook seams raise — the loop must treat them as no-ops, never
-    crash the turn (a buggy hook provider shouldn't take down a turn)."""
+class _ThrowingConv:
+    """Decider seams (and run_context) raise — the loop must treat them as
+    no-ops, never crash the turn (a buggy consumer shouldn't take down a turn)."""
 
-    def __init__(self, raise_active: bool) -> None:
-        self._raise_active = raise_active
+    def __init__(self, raise_before_tool: bool) -> None:
+        self._raise_before_tool = raise_before_tool
 
     async def build_prompt(self, sid: str, message: str, **kw: object) -> list[dict[str, object]]:
         return [{"role": "user", "content": message}]
@@ -394,44 +318,40 @@ class _ThrowingHooks:
     def list_sessions(self) -> list[dict[str, object]]:
         return []
 
-    def active_hooks(self, event: str) -> list[HookRegistration]:
-        if self._raise_active:
+    async def before_tool(self, ctx: HookContext) -> BeforeToolResult | None:
+        if self._raise_before_tool:
             raise RuntimeError("boom")
-
-        async def noop(ctx: HookContext) -> None:
-            return None
-
-        return [HookRegistration(noop)]
+        return None  # benign — so run_context (which raises) still gets built
 
     def run_context(self) -> dict[str, object]:
         raise RuntimeError("boom")
 
 
-def test_loop_survives_throwing_active_hooks() -> None:
+def test_loop_survives_throwing_before_tool() -> None:
     async def go() -> None:
         tool = _RecordingTool()
         loop = AgentLoop(
             bus=MessageBus(),
             provider=_Provider([_tool_call(args={"q": "x"}), LLMResponse(content="final")]),
-            conversation=_ThrowingHooks(raise_active=True),
+            conversation=_ThrowingConv(raise_before_tool=True),
             tools=[tool],
         )
         out = await loop.process_direct("go")
         assert out == "final"
-        assert tool.executed  # throwing active_hooks treated as no hooks
+        assert tool.executed  # a throwing decider is treated as no decision
 
     asyncio.run(go())
 
 
 def test_loop_survives_throwing_run_context() -> None:
     async def go() -> None:
-        # active_hooks returns a benign hook, so _make_hook_context runs and
-        # hits the throwing run_context — which must degrade to an empty bag.
+        # before_tool returns None (benign), so the context gets built and hits
+        # the throwing run_context — which must degrade to an empty bag.
         tool = _RecordingTool()
         loop = AgentLoop(
             bus=MessageBus(),
             provider=_Provider([_tool_call(args={"q": "x"}), LLMResponse(content="final")]),
-            conversation=_ThrowingHooks(raise_active=False),
+            conversation=_ThrowingConv(raise_before_tool=False),
             tools=[tool],
         )
         out = await loop.process_direct("go")

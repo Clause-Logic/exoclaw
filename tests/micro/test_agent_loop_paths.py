@@ -14,11 +14,8 @@ Pure-Python — runs under ``tests/_micropython_runner/run.py``.
 import asyncio
 
 from exoclaw.agent.hooks import (
-    BEFORE_FINISH,
-    BEFORE_TOOL,
     BeforeFinishResult,
     BeforeToolResult,
-    HookRegistration,
 )
 from exoclaw.agent.loop import AgentLoop
 from exoclaw.bus.events import InboundMessage
@@ -979,10 +976,11 @@ def test_on_before_finish_injects_then_ends():
 
 
 class _HookConv:
-    """Conversation that surfaces active_hooks + run_context."""
+    """Conversation that delegates the decider seams + surfaces run_context."""
 
-    def __init__(self, hooks=None, run_ctx=None):
-        self._hooks = hooks or {}
+    def __init__(self, before_tool=None, before_finish=None, run_ctx=None):
+        self._bt = before_tool
+        self._bf = before_finish
         self._run_ctx = run_ctx or {}
 
     async def build_prompt(self, sid, message, **kw):
@@ -997,11 +995,14 @@ class _HookConv:
     def list_sessions(self):
         return []
 
-    def active_hooks(self, event):
-        return self._hooks.get(event, [])
-
     def run_context(self):
         return self._run_ctx
+
+    async def before_tool(self, ctx):
+        return await self._bt(ctx) if self._bt else None
+
+    async def before_finish(self, ctx):
+        return await self._bf(ctx) if self._bf else None
 
 
 class _RecTool:
@@ -1027,8 +1028,8 @@ def _tool_call_resp(name="do", args=None):
     )
 
 
-def test_before_tool_hook_stamps_and_runs_effect():
-    """A before_tool hook reads run_context, runs a side effect via
+def test_before_tool_decider_stamps_and_runs_effect():
+    """A before_tool decider reads run_context, runs a side effect via
     run_effect, and stamps the authoritative value onto the tool args."""
 
     async def _go():
@@ -1044,7 +1045,7 @@ def test_before_tool_hook_stamps_and_runs_effect():
             p["cycle_id"] = ctx.run_context.get("cycle_id")
             return BeforeToolResult(params=p)
 
-        conv = _HookConv(hooks={BEFORE_TOOL: [HookRegistration(stamp)]}, run_ctx={"cycle_id": "C1"})
+        conv = _HookConv(before_tool=stamp, run_ctx={"cycle_id": "C1"})
         loop = AgentLoop(
             bus=MessageBus(),
             provider=_StubProvider(
@@ -1061,14 +1062,14 @@ def test_before_tool_hook_stamps_and_runs_effect():
     asyncio.run(_go())
 
 
-def test_before_tool_hook_vetoes():
+def test_before_tool_decider_vetoes():
     async def _go():
         tool = _RecTool()
 
         async def veto(ctx):
             return BeforeToolResult(block=True, block_reason="no")
 
-        conv = _HookConv(hooks={BEFORE_TOOL: [HookRegistration(veto)]})
+        conv = _HookConv(before_tool=veto)
         loop = AgentLoop(
             bus=MessageBus(),
             provider=_StubProvider([_tool_call_resp(), LLMResponse(content="final")]),
@@ -1082,7 +1083,7 @@ def test_before_tool_hook_vetoes():
     asyncio.run(_go())
 
 
-def test_before_finish_hook_injects():
+def test_before_finish_decider_injects():
     async def _go():
         seen = []
 
@@ -1090,7 +1091,7 @@ def test_before_finish_hook_injects():
             seen.append(1)
             return BeforeFinishResult(continue_message="keep going" if len(seen) == 1 else None)
 
-        conv = _HookConv(hooks={BEFORE_FINISH: [HookRegistration(nudge)]})
+        conv = _HookConv(before_finish=nudge)
         loop = AgentLoop(
             bus=MessageBus(),
             provider=_StubProvider([LLMResponse(content="partial"), LLMResponse(content="done")]),
@@ -1104,11 +1105,11 @@ def test_before_finish_hook_injects():
 
 
 class _ThrowingHookConv:
-    """active_hooks (and run_context) raise — the loop must treat them as
+    """Decider seams (and run_context) raise — the loop must treat them as
     no-ops, never crash the turn."""
 
-    def __init__(self, raise_active):
-        self._raise_active = raise_active
+    def __init__(self, raise_before_tool):
+        self._raise_before_tool = raise_before_tool
 
     async def build_prompt(self, sid, message, **kw):
         return [{"role": "user", "content": message}]
@@ -1122,20 +1123,16 @@ class _ThrowingHookConv:
     def list_sessions(self):
         return []
 
-    def active_hooks(self, event):
-        if self._raise_active:
+    async def before_tool(self, ctx):
+        if self._raise_before_tool:
             raise RuntimeError("boom")
-
-        async def noop(ctx):
-            return None
-
-        return [HookRegistration(noop)]
+        return None
 
     def run_context(self):
         raise RuntimeError("boom")
 
 
-def test_throwing_active_hooks_is_noop():
+def test_throwing_before_tool_is_noop():
     async def _go():
         tool = _RecTool()
         loop = AgentLoop(
@@ -1143,7 +1140,7 @@ def test_throwing_active_hooks_is_noop():
             provider=_StubProvider(
                 [_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]
             ),
-            conversation=_ThrowingHookConv(raise_active=True),
+            conversation=_ThrowingHookConv(raise_before_tool=True),
             tools=[tool],
         )
         out = await loop.process_direct("go")
@@ -1161,7 +1158,7 @@ def test_throwing_run_context_is_noop():
             provider=_StubProvider(
                 [_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]
             ),
-            conversation=_ThrowingHookConv(raise_active=False),
+            conversation=_ThrowingHookConv(raise_before_tool=False),
             tools=[tool],
         )
         out = await loop.process_direct("go")

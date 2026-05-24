@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from exoclaw.agent.hooks import HookRegistration
+    from exoclaw.agent.hooks import BeforeFinishResult, BeforeToolResult, HookContext
 
 
 @runtime_checkable
@@ -74,17 +74,24 @@ class Conversation(Protocol):
         """
         return set()
 
-    def active_hooks(self, event: str) -> list[HookRegistration]:
-        """Return the lifecycle hooks active for the current turn at ``event``.
-
-        Optional hook — sibling to ``active_tools``. The agent loop calls it
-        at each lifecycle seam (``before_tool``, ``before_finish``) and runs
-        the returned handlers in priority order. A Conversation that opts in
-        returns whatever hooks it considers active this turn, so behaviour can
-        be made conditional — but core stays agnostic, it only sees
-        ``(handler, priority)`` pairs. Return an empty list to fire nothing.
+    async def before_tool(self, ctx: HookContext) -> BeforeToolResult | None:
+        """Decide what to do before a tool call. Optional — sibling to
+        ``active_tools``. The agent loop builds the ``HookContext`` and calls
+        this before each tool dispatch; return a ``BeforeToolResult`` to
+        replace the tool's args (``params``) or veto the call (``block`` +
+        ``block_reason``), or ``None`` to leave it unchanged. The consumer owns
+        whether anything fires and how multiple hooks compose into this one
+        result — core just applies it.
         """
-        return []
+        return None
+
+    async def before_finish(self, ctx: HookContext) -> BeforeFinishResult | None:
+        """Decide what to do when the model ends a turn with no tool calls.
+        Optional. Return a ``BeforeFinishResult`` with a non-empty
+        ``continue_message`` to re-prompt (the loop appends it as a user turn
+        and continues), or ``None`` to let the turn end.
+        """
+        return None
 
     def run_context(self) -> dict[str, Any]:
         """Return the per-run context bag exposed to hooks via

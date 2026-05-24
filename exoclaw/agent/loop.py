@@ -31,10 +31,9 @@ from exoclaw.agent.conversation import Conversation
 from exoclaw.agent.hooks import (
     BEFORE_FINISH,
     BEFORE_TOOL,
+    BeforeFinishResult,
+    BeforeToolResult,
     HookContext,
-    HookRegistration,
-    dispatch_before_finish,
-    dispatch_before_tool,
     passthrough_effect,
 )
 from exoclaw.agent.tools.protocol import Tool, ToolContext
@@ -301,21 +300,25 @@ class AgentLoop:
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
-    def _active_hooks(self, event: str) -> list[HookRegistration]:
-        """Lifecycle hooks active for this turn at ``event`` — sibling to the
-        loop's ``active_tools`` consult. Reached via ``getattr`` so a
-        Conversation that doesn't implement the optional method (or a test
-        double) simply contributes no hooks. Defensive against non-list
-        returns so a spec-less mock can't break the tool path."""
-        fn = getattr(self.conversation, "active_hooks", None)
+    async def _call_decider(self, method: str, event: str, **fields: Any) -> Any:
+        """Call an optional Conversation decider (``before_tool`` /
+        ``before_finish``) with a freshly built HookContext, and return its
+        decision (or None).
+
+        Reached via ``getattr`` so a Conversation that doesn't implement the
+        optional async method simply contributes nothing. Anything that goes
+        wrong — a non-awaitable test double, or a decider that raises — is
+        logged and treated as no-op, so a buggy consumer can't take down the
+        turn. (No ``__await__`` pre-check: MicroPython coroutines don't expose
+        it, so we just await and let the try/except catch a non-coroutine.)"""
+        fn = getattr(self.conversation, method, None)
         if fn is None:
-            return []
+            return None
         try:
-            regs = fn(event)
+            return await fn(self._make_hook_context(event, **fields))
         except Exception:
-            self._log.exception("active_hooks_error", **{"hook.event": event})
-            return []
-        return regs if isinstance(regs, list) else []
+            self._log.exception("hook_decider_error", **{"hook.event": event})
+            return None
 
     def _make_hook_context(self, event: str, **fields: Any) -> HookContext:
         """Build the HookContext for a seam: the per-run bag (from the
@@ -559,20 +562,17 @@ class AgentLoop:
                                 sk,
                             )
                         if not rejection:
-                            # before_tool hooks active for this turn (via the
-                            # Conversation). They compose with the global
-                            # on_pre_tool: each may further mutate the args or
-                            # veto the call.
-                            bt_hooks = self._active_hooks(BEFORE_TOOL)
-                            if bt_hooks:
-                                bt = await dispatch_before_tool(
-                                    bt_hooks,
-                                    self._make_hook_context(
-                                        BEFORE_TOOL,
-                                        tool_name=tool_call.name,
-                                        params=tool_call.arguments,
-                                    ),
-                                )
+                            # before_tool decider (via the Conversation) composes
+                            # with the global on_pre_tool: it may further mutate
+                            # the args or veto the call. The Conversation owns
+                            # how any hooks behind it collapse into this result.
+                            bt = await self._call_decider(
+                                "before_tool",
+                                BEFORE_TOOL,
+                                tool_name=tool_call.name,
+                                params=tool_call.arguments,
+                            )
+                            if isinstance(bt, BeforeToolResult):
                                 if bt.params is not None:
                                     tool_call.arguments = bt.params
                                 if bt.block:
@@ -679,19 +679,15 @@ class AgentLoop:
                         self._on_before_finish, clean or "", list(tools_used), sk
                     )
                 if not followup:
-                    # before_finish hooks active for this turn (via the
-                    # Conversation). They compose with the global
-                    # on_before_finish: highest-priority non-empty wins.
-                    bf_hooks = self._active_hooks(BEFORE_FINISH)
-                    if bf_hooks:
-                        bf = await dispatch_before_finish(
-                            bf_hooks,
-                            self._make_hook_context(
-                                BEFORE_FINISH,
-                                final_content=clean or "",
-                                tools_used=list(tools_used),
-                            ),
-                        )
+                    # before_finish decider (via the Conversation) composes with
+                    # the global on_before_finish.
+                    bf = await self._call_decider(
+                        "before_finish",
+                        BEFORE_FINISH,
+                        final_content=clean or "",
+                        tools_used=list(tools_used),
+                    )
+                    if isinstance(bf, BeforeFinishResult):
                         followup = bf.continue_message
                 if followup:
                     nudge: dict[str, object] = {"role": "user", "content": str(followup)}

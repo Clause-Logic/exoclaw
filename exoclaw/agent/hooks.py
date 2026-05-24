@@ -1,20 +1,22 @@
 """Agent lifecycle hooks — the generic contract.
 
 The agent loop fires hooks at lifecycle seams (currently ``before_tool`` and
-``before_finish``) and asks the Conversation which hooks are active for the
-current turn — exactly the way it already asks ``Conversation.active_tools()``
-which optional tools to advertise. Core does NOT know or care where those hooks
-come from: a consumer reports them per turn, and core only defines the context
-handed to a hook, the decision shapes a hook returns, and the priority-ordered
-dispatch. What decides activation (and what produces the hooks) lives entirely
-in the consumer.
+``before_finish``). At each seam it builds a ``HookContext`` and asks the
+Conversation for a single decision — the same way it already asks
+``Conversation.active_tools()`` which optional tools to advertise. Core defines
+only three things: the **context** handed to a hook, the **decision shapes** a
+hook returns, and the seams the loop calls. It has no opinion on what produces
+those decisions, how many hooks there are, or how they compose — a consumer
+decides activation and collapses any number of hooks into the one result core
+applies.
 
-The contract (events, decision shapes, priority-ordered merge) is ported from
-openclaw's plugin hook system. Two things differ: openclaw's plugin hooks are
-always-on globals, whereas here activation is whatever the Conversation reports
-per turn (so a consumer can make them conditional); and a hook reaches back
-into the runtime through an in-process ``HookContext`` rather than a foreign
-script.
+The decision shapes (mutate args / veto a tool, re-prompt a stopped model) are
+ported from openclaw's plugin hook system. Two things differ: activation is
+per-turn (whatever the Conversation reports), not always-on globals; and a hook
+reaches back into the runtime through an in-process ``HookContext`` rather than
+a foreign script. (The priority-ordered *runner* that merges multiple hooks
+into one decision lives in the consumer, exactly as openclaw keeps its hook
+runner in the plugin layer rather than the agent core.)
 
 ``HookContext`` is the hook's only door back into the runtime. Keeping I/O
 behind ``run_effect`` means a hook author writes plain async code and can't
@@ -41,22 +43,18 @@ from exoclaw._compat import IS_MICROPYTHON
 BEFORE_TOOL = "before_tool"
 BEFORE_FINISH = "before_finish"
 
-# A hook handler takes the context and returns an event-specific result (or
-# ``None`` for "no opinion").
-HookHandler = Callable[["HookContext"], Awaitable[Any]]
-
 
 if not IS_MICROPYTHON:  # pragma: no cover (micropython)
     from dataclasses import dataclass
 
     @dataclass
     class BeforeToolResult:
-        """Decision from a ``before_tool`` hook.
+        """The decision a ``before_tool`` consumer returns.
 
-        ``params`` (when not ``None``) replaces the tool's arguments for the
-        next hook and the eventual call — how a hook stamps an authoritative
-        value. ``block=True`` refuses the call; ``block_reason`` becomes the
-        tool result the model sees (a positive nudge, not an error).
+        ``params`` (when not ``None``) replaces the tool's arguments — how a
+        consumer stamps an authoritative value. ``block=True`` refuses the
+        call; ``block_reason`` becomes the tool result the model sees (a
+        positive nudge, not an error).
         """
 
         params: dict[str, Any] | None = None
@@ -65,7 +63,7 @@ if not IS_MICROPYTHON:  # pragma: no cover (micropython)
 
     @dataclass
     class BeforeFinishResult:
-        """Decision from a ``before_finish`` hook.
+        """The decision a ``before_finish`` consumer returns.
 
         A non-empty ``continue_message`` is appended as a user turn and the
         loop continues (the model gets another turn); ``None``/empty lets the
@@ -76,7 +74,8 @@ if not IS_MICROPYTHON:  # pragma: no cover (micropython)
 
     @dataclass
     class HookContext:
-        """Handle the loop passes to each hook — its door back into the runtime."""
+        """Handle the loop passes to a hook decision — its door back into the
+        runtime."""
 
         event: str
         run_context: dict[str, Any]
@@ -87,18 +86,6 @@ if not IS_MICROPYTHON:  # pragma: no cover (micropython)
         params: dict[str, Any] | None = None
         final_content: str | None = None
         tools_used: list[str] | None = None
-
-    @dataclass
-    class HookRegistration:
-        """One active hook: its handler and a priority (higher runs first).
-
-        What ``Conversation.active_hooks(event)`` returns. Core treats it as an
-        opaque (handler, priority) pair — it does not know or care what produced
-        it.
-        """
-
-        handler: HookHandler
-        priority: int = 0
 
 else:  # pragma: no cover (cpython)
 
@@ -137,53 +124,6 @@ else:  # pragma: no cover (cpython)
             self.params = params
             self.final_content = final_content
             self.tools_used = tools_used
-
-    class HookRegistration:
-        def __init__(self, handler: HookHandler, priority: int = 0) -> None:
-            self.handler = handler
-            self.priority = priority
-
-
-def _ordered(regs: list[HookRegistration]) -> list[HookRegistration]:
-    # Higher priority first; stable so same-priority hooks keep their order
-    # (deterministic across durable replay).
-    return sorted(regs, key=lambda r: -r.priority)
-
-
-async def dispatch_before_tool(regs: list[HookRegistration], ctx: HookContext) -> BeforeToolResult:
-    """Run ``before_tool`` hooks as ordered middleware over the tool call.
-
-    Param mutations **compose**: each hook sees the args as mutated by the
-    higher-priority hooks before it, so e.g. a cycle-id stamp and a redaction
-    hook stack cleanly. The first hook to ``block`` wins and short-circuits — a
-    refusal is a policy decision a lower-priority hook shouldn't override.
-    """
-    result = BeforeToolResult(params=ctx.params)
-    for reg in _ordered(regs):
-        ctx.params = result.params  # feed accumulated mutations forward
-        out = await reg.handler(ctx)
-        if out is None:
-            continue
-        if out.params is not None:
-            result.params = out.params
-        if out.block:
-            result.block = True
-            result.block_reason = out.block_reason
-            break
-    return result
-
-
-async def dispatch_before_finish(
-    regs: list[HookRegistration], ctx: HookContext
-) -> BeforeFinishResult:
-    """Run ``before_finish`` hooks in priority order; the highest-priority
-    non-empty ``continue_message`` decides the re-prompt. One re-prompt per
-    stop — the host caps repeats and ``max_iterations`` backstops."""
-    for reg in _ordered(regs):
-        out = await reg.handler(ctx)
-        if out is not None and out.continue_message:
-            return BeforeFinishResult(continue_message=out.continue_message)
-    return BeforeFinishResult()
 
 
 async def passthrough_effect(

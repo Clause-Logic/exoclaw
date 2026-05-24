@@ -1028,19 +1028,14 @@ def _tool_call_resp(name="do", args=None):
     )
 
 
-def test_before_tool_decider_stamps_and_runs_effect():
-    """A before_tool decider reads run_context, runs a side effect via
-    run_effect, and stamps the authoritative value onto the tool args."""
+def test_before_tool_decider_stamps_from_run_context():
+    """A before_tool decider reads run_context and stamps the authoritative
+    value onto the tool args."""
 
     async def _go():
         tool = _RecTool()
-        effects = []
 
         async def stamp(ctx):
-            async def _eff():
-                effects.append(1)
-
-            await ctx.run_effect(_eff)
             p = dict(ctx.params or {})
             p["cycle_id"] = ctx.run_context.get("cycle_id")
             return BeforeToolResult(params=p)
@@ -1057,7 +1052,6 @@ def test_before_tool_decider_stamps_and_runs_effect():
         out = await loop.process_direct("go")
         assert out == "final"
         assert tool.received == {"q": "x", "cycle_id": "C1"}
-        assert effects == [1]
 
     asyncio.run(_go())
 

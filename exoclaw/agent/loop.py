@@ -34,7 +34,6 @@ from exoclaw.agent.hooks import (
     BeforeFinishResult,
     BeforeToolResult,
     HookContext,
-    passthrough_effect,
 )
 from exoclaw.agent.tools.protocol import Tool, ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
@@ -321,9 +320,8 @@ class AgentLoop:
             return None
 
     def _make_hook_context(self, event: str, **fields: Any) -> HookContext:
-        """Build the HookContext for a seam: the per-run bag (from the
-        Conversation), the live transcript, and the executor-backed
-        ``run_effect`` so a hook's I/O is journaled by durable executors."""
+        """Build the read-only HookContext for a seam: the per-run bag (from
+        the Conversation) and a copy of the live transcript."""
         run_context: dict[str, Any] = {}
         rc = getattr(self.conversation, "run_context", None)
         if rc is not None:
@@ -334,10 +332,6 @@ class AgentLoop:
             except Exception:
                 self._log.exception("run_context_error")
 
-        # Executor-backed so durable executors journal a hook's I/O; falls
-        # back to inline for executors predating run_effect.
-        run_effect = getattr(self._executor, "run_effect", passthrough_effect)
-
         return HookContext(
             event=event,
             run_context=run_context,
@@ -346,7 +340,6 @@ class AgentLoop:
             # the executor's in-flight buffer, so a hook mutating one would
             # corrupt what the provider sees next iteration.
             messages=[dict(m) for m in self._executor.load_messages()],
-            run_effect=run_effect,
             **fields,
         )
 

@@ -13,18 +13,20 @@ applies.
 The decision shapes (mutate args / veto a tool, re-prompt a stopped model) are
 ported from openclaw's plugin hook system. Two things differ: activation is
 per-turn (whatever the Conversation reports), not always-on globals; and a hook
-reaches back into the runtime through an in-process ``HookContext`` rather than
-a foreign script. (The priority-ordered *runner* that merges multiple hooks
-into one decision lives in the consumer, exactly as openclaw keeps its hook
-runner in the plugin layer rather than the agent core.)
+is in-process code the consumer owns, not a foreign script. (The priority-ordered
+*runner* that merges multiple hooks into one decision lives in the consumer,
+exactly as openclaw keeps its hook runner in the plugin layer rather than the
+agent core.)
 
-``HookContext`` is the hook's only door back into the runtime. Keeping I/O
-behind ``run_effect`` means a hook author writes plain async code and can't
-break durable replay — the executor owns journaling. ``run_context`` is a
+``HookContext`` is **read-only** context for the decision: ``run_context`` is a
 per-run bag the host seeds (e.g. a cycle id) so a hook can read authoritative
 values instead of trusting the model's tool args; ``messages`` is the current
-transcript (read-only) so e.g. a budget hook counts prior calls instead of
-holding a counter that wouldn't survive replay.
+transcript so e.g. a budget hook counts prior calls instead of holding a counter
+that wouldn't survive replay. A decider is pure, deterministic logic — it reads
+this context and returns a decision, and runs inline in the turn. It performs no
+durable I/O: that belongs in an activity/step the consumer's hook dispatches (the
+one durability primitive every executor implements natively), not behind a
+framework seam that only in-process executors can honour.
 
 Dual-class pattern (see ``exoclaw/bus/events.py``): MicroPython strips
 ``name: type`` annotations at compile time, so a runtime ``@dataclass`` can't
@@ -34,7 +36,7 @@ build ``__init__``. CPython gets real dataclasses; MP gets hand-written
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from exoclaw._compat import IS_MICROPYTHON
 
@@ -80,7 +82,6 @@ if not IS_MICROPYTHON:  # pragma: no cover (micropython)
         event: str
         run_context: dict[str, Any]
         messages: list[dict[str, Any]]
-        run_effect: Callable[..., Awaitable[Any]]
         # Event-specific fields, populated by the loop per seam.
         tool_name: str | None = None
         params: dict[str, Any] | None = None
@@ -110,7 +111,6 @@ else:  # pragma: no cover (cpython)
             event: str,
             run_context: dict[str, Any],
             messages: list[dict[str, Any]],
-            run_effect: Callable[..., Awaitable[Any]],
             tool_name: str | None = None,
             params: dict[str, Any] | None = None,
             final_content: str | None = None,
@@ -119,17 +119,7 @@ else:  # pragma: no cover (cpython)
             self.event = event
             self.run_context = run_context
             self.messages = messages
-            self.run_effect = run_effect
             self.tool_name = tool_name
             self.params = params
             self.final_content = final_content
             self.tools_used = tools_used
-
-
-async def passthrough_effect(
-    fn: Callable[..., Awaitable[object]], *args: object, **kwargs: object
-) -> object:
-    """Default ``HookContext.run_effect`` when the executor doesn't provide one
-    (an executor predating ``run_effect``). Runs the effect inline; durable
-    executors override ``run_effect`` to journal it for replay safety instead."""
-    return await fn(*args, **kwargs)

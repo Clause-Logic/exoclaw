@@ -5,9 +5,9 @@ Core asks the Conversation for one decision per seam (``before_tool`` /
 ``before_finish``) and applies it — it has no opinion on what produces that
 decision or how multiple hooks compose into it (that lives in the consumer).
 These tests use a stub conversation that returns a single decision directly,
-proving the loop applies mutate/veto/inject, exposes ``run_context`` +
-``run_effect``, and that an absent/raising decider is a no-op (so existing
-conversations are unaffected and a buggy consumer can't take down a turn).
+proving the loop applies mutate/veto/inject, exposes ``run_context``, and that
+an absent/raising decider is a no-op (so existing conversations are unaffected
+and a buggy consumer can't take down a turn).
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from exoclaw.agent.hooks import (
     BeforeFinishResult,
     BeforeToolResult,
     HookContext,
-    passthrough_effect,
 )
 from exoclaw.agent.loop import AgentLoop
 from exoclaw.bus.queue import MessageBus
@@ -105,24 +104,6 @@ def _tool_call(name: str = "do", args: dict[str, object] | None = None) -> LLMRe
         tool_calls=[ToolCallRequest(id="tc1", name=name, arguments=args or {})],
         finish_reason="tool_calls",
     )
-
-
-def test_passthrough_effect_runs_inline() -> None:
-    """The default run_effect (for executors without one) just awaits the
-    callable inline."""
-
-    async def go() -> None:
-        ran: list[int] = []
-
-        async def eff(x: int) -> int:
-            ran.append(x)
-            return x * 2
-
-        out = await passthrough_effect(eff, 21)
-        assert out == 42
-        assert ran == [21]
-
-    asyncio.run(go())
 
 
 def test_loop_before_tool_decider_stamps_from_run_context() -> None:
@@ -273,34 +254,6 @@ def test_loop_before_finish_decider_injects_and_continues() -> None:
         out = await loop.process_direct("go")
         assert out == "done"
         assert len(seen) == 2  # fired on both stops; continued after the first
-
-    asyncio.run(go())
-
-
-def test_loop_before_tool_decider_can_run_effect() -> None:
-    """A decider can dispatch a side effect through HookContext.run_effect (the
-    executor-backed seam durable executors journal). On DirectExecutor it runs
-    inline."""
-
-    async def go() -> None:
-        ran: list[str] = []
-
-        async def effectful(ctx: HookContext) -> BeforeToolResult | None:
-            async def _record() -> None:
-                ran.append("effect")
-
-            await ctx.run_effect(_record)
-            return None
-
-        conv = _Conv(before_tool=effectful)
-        loop = AgentLoop(
-            bus=MessageBus(),
-            provider=_Provider([_tool_call(), LLMResponse(content="final")]),
-            conversation=conv,
-            tools=[_RecordingTool()],
-        )
-        await loop.process_direct("go")
-        assert ran == ["effect"]
 
     asyncio.run(go())
 

@@ -340,11 +340,17 @@ def test_loop_fires_nothing_when_conversation_has_no_deciders() -> None:
     asyncio.run(go())
 
 
-def test_conversation_protocol_decider_seams_default_none() -> None:
-    """The optional decider seams (and active_tools/run_context) default to
-    no-op, so a conversation that doesn't override them contributes nothing."""
+def test_conversation_hook_seams_are_off_protocol_optin() -> None:
+    """before_tool / before_finish / run_context are opt-in seams, NOT members
+    of the Conversation Protocol. ``_Plain`` deliberately does NOT inherit
+    Conversation — it's a structural impl mirroring exoclaw-turn's
+    ``_EphemeralConversation`` (the real impl whose conformance 0.30.0 broke by
+    putting the seams on the Protocol). It implements the required surface
+    (incl. active_tools) and omits the seams; the ``Conversation`` annotation
+    statically pins that this still conforms, and the loop reaches the seams via
+    getattr with a no-op fallback so they stay absent here."""
 
-    class _Default(Conversation):
+    class _Plain:  # no Conversation base — exercises structural conformance
         async def build_prompt(
             self, session_id: str, message: str, **kw: object
         ) -> list[dict[str, object]]:
@@ -359,17 +365,15 @@ def test_conversation_protocol_decider_seams_default_none() -> None:
         def list_sessions(self) -> list[dict[str, object]]:
             return []
 
-    async def go() -> None:
-        c = _Default()
-        ctx = HookContext(
-            event="before_tool", run_context={}, messages=[], run_effect=passthrough_effect
-        )
-        assert c.active_tools() == set()
-        assert await c.before_tool(ctx) is None
-        assert await c.before_finish(ctx) is None
-        assert c.run_context() == {}
+        def active_tools(self) -> set[str]:
+            return set()
 
-    asyncio.run(go())
+    c: Conversation = _Plain()  # ty statically verifies structural conformance
+    assert isinstance(c, Conversation)  # runtime_checkable structural check
+    # The hook seams are simply absent — opt-in only, reached via getattr.
+    assert getattr(c, "before_tool", None) is None
+    assert getattr(c, "before_finish", None) is None
+    assert getattr(c, "run_context", None) is None
 
 
 class _ThrowingConv:

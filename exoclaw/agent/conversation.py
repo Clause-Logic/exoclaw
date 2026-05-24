@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
-
-if TYPE_CHECKING:
-    from exoclaw.agent.hooks import BeforeFinishResult, BeforeToolResult, HookContext
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -74,34 +71,28 @@ class Conversation(Protocol):
         """
         return set()
 
-    async def before_tool(self, ctx: HookContext) -> BeforeToolResult | None:
-        """Decide what to do before a tool call. Optional — sibling to
-        ``active_tools``. The agent loop builds the ``HookContext`` and calls
-        this before each tool dispatch; return a ``BeforeToolResult`` to
-        replace the tool's args (``params``) or veto the call (``block`` +
-        ``block_reason``), or ``None`` to leave it unchanged. The consumer owns
-        whether anything fires and how multiple hooks compose into this one
-        result — core just applies it.
-        """
-        return None
-
-    async def before_finish(self, ctx: HookContext) -> BeforeFinishResult | None:
-        """Decide what to do when the model ends a turn with no tool calls.
-        Optional. Return a ``BeforeFinishResult`` with a non-empty
-        ``continue_message`` to re-prompt (the loop appends it as a user turn
-        and continues), or ``None`` to let the turn end.
-        """
-        return None
-
-    def run_context(self) -> dict[str, Any]:
-        """Return the per-run context bag exposed to hooks via
-        ``HookContext.run_context``.
-
-        Optional. Lets the host surface authoritative per-run values (e.g. a
-        cycle id minted before the turn) so a hook can read them instead of
-        trusting the model's tool args. Defaults to empty.
-        """
-        return {}
+    # NOTE: ``before_tool``, ``before_finish`` and ``run_context`` are optional
+    # lifecycle-hook seams that live on concrete Conversation implementations
+    # rather than on this Protocol — same reasoning as ``recover_from_overflow``
+    # below and ``Executor.monotonic_ms``. Declaring them here would force every
+    # structural Conversation impl (and any external one) to define all three or
+    # fail static conformance — a breaking change for an additive, opt-in
+    # capability. The agent loop reaches each via ``getattr`` with a no-op
+    # fallback (``_call_decider`` / ``_make_hook_context``), so opting in is
+    # purely additive. Implementations that opt in provide:
+    #
+    #     async def before_tool(self, ctx: HookContext) -> BeforeToolResult | None: ...
+    #     async def before_finish(self, ctx: HookContext) -> BeforeFinishResult | None: ...
+    #     def run_context(self) -> dict[str, Any]: ...
+    #
+    # before_tool: return a ``BeforeToolResult`` to replace the tool's args
+    # (``params``) or veto the call (``block`` + ``block_reason``), or ``None``
+    # to leave it unchanged. before_finish: return a ``BeforeFinishResult`` with
+    # a non-empty ``continue_message`` to re-prompt a model that stopped, or
+    # ``None`` to let the turn end. run_context: return the per-run bag exposed
+    # to hooks via ``HookContext.run_context`` (e.g. a cycle id minted before
+    # the turn). The consumer owns whether anything fires and how multiple hooks
+    # compose into the one result core applies.
 
     # NOTE: ``recover_from_overflow`` lives on concrete Conversation
     # implementations as an optional method rather than on this Protocol.

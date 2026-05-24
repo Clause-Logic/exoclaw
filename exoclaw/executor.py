@@ -992,7 +992,7 @@ class DirectExecutor:
         *args: object,
         **kwargs: object,
     ) -> object:
-        """Run a side-effecting async callable a lifecycle hook dispatched
+        """Run a side-effecting async callable that a lifecycle hook dispatched
         (``HookContext.run_effect``). Pass-through here — the effect runs
         inline. Durable executors (DBOS, Temporal) override this to wrap the
         call in a journaled step/activity so a hook's I/O replays exactly

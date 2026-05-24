@@ -178,6 +178,79 @@ def test_loop_before_tool_decider_vetoes_call() -> None:
     asyncio.run(go())
 
 
+def test_loop_before_tool_inplace_param_mutation_does_not_change_call() -> None:
+    """Mutating ``ctx.params`` in place must NOT change the tool call — only an
+    explicit BeforeToolResult(params=...) does. The loop hands the decider a
+    copy, so a hook that scribbles on ctx.params and returns None is a no-op."""
+
+    async def go() -> None:
+        tool = _RecordingTool()
+
+        async def scribble(ctx: HookContext) -> None:
+            (ctx.params or {})["evil"] = "injected"  # in-place, no result returned
+            return None
+
+        conv = _Conv(before_tool=scribble)
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_Provider([_tool_call(args={"q": "x"}), LLMResponse(content="final")]),
+            conversation=conv,
+            tools=[tool],
+        )
+        out = await loop.process_direct("go")
+        assert out == "final"
+        assert tool.executed
+        assert tool.received == {"q": "x"}  # no "evil" key — the call is untouched
+
+    asyncio.run(go())
+
+
+def test_loop_hook_cannot_corrupt_transcript_via_messages() -> None:
+    """A decider that mutates ``ctx.messages`` must NOT change what the provider
+    sees on later iterations — messages is a read-only per-dict copy of the
+    transcript, not the executor's live buffer."""
+
+    async def go() -> None:
+        seen_roles: list[list[str]] = []
+
+        class _RecProvider:
+            def __init__(self, replies: list[LLMResponse]) -> None:
+                self._replies = list(replies)
+
+            def get_default_model(self) -> str:
+                return "test-model"
+
+            async def chat(
+                self,
+                messages: list[dict[str, object]],
+                tools: list[dict[str, object]] | None = None,
+                model: str | None = None,
+                **kw: object,
+            ) -> LLMResponse:
+                seen_roles.append([str(m.get("role")) for m in messages])
+                return self._replies.pop(0) if self._replies else LLMResponse(content="ok")
+
+        async def corrupt(ctx: HookContext) -> None:
+            for m in ctx.messages:
+                m["role"] = "HACKED"
+            return None
+
+        conv = _Conv(before_tool=corrupt)
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_RecProvider([_tool_call(args={"q": "x"}), LLMResponse(content="final")]),
+            conversation=conv,
+            tools=[_RecordingTool()],
+        )
+        out = await loop.process_direct("go")
+        assert out == "final"
+        # The hook fired between iteration 1 and 2; iteration 2's prompt must not
+        # carry the hook's scribble.
+        assert all("HACKED" not in roles for roles in seen_roles)
+
+    asyncio.run(go())
+
+
 def test_loop_before_finish_decider_injects_and_continues() -> None:
     """A before_finish decider re-prompts a model that stopped without a
     required tool; the loop continues and ends on the next response."""

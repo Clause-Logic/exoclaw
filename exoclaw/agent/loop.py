@@ -341,7 +341,11 @@ class AgentLoop:
         return HookContext(
             event=event,
             run_context=run_context,
-            messages=self._executor.load_messages(),
+            # Per-dict copy: messages is a read-only transcript for hooks.
+            # load_messages() returns fresh list but the SAME dict objects as
+            # the executor's in-flight buffer, so a hook mutating one would
+            # corrupt what the provider sees next iteration.
+            messages=[dict(m) for m in self._executor.load_messages()],
             run_effect=run_effect,
             **fields,
         )
@@ -570,7 +574,10 @@ class AgentLoop:
                                 "before_tool",
                                 BEFORE_TOOL,
                                 tool_name=tool_call.name,
-                                params=tool_call.arguments,
+                                # Copy: a decider mutating ctx.params in place
+                                # must NOT change the call — only an explicit
+                                # BeforeToolResult(params=...) does (applied below).
+                                params=dict(tool_call.arguments),
                             )
                             if isinstance(bt, BeforeToolResult):
                                 if bt.params is not None:

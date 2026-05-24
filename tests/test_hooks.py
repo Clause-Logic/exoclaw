@@ -340,9 +340,13 @@ def test_loop_fires_nothing_when_conversation_has_no_deciders() -> None:
     asyncio.run(go())
 
 
-def test_conversation_protocol_decider_seams_default_none() -> None:
-    """The optional decider seams (and active_tools/run_context) default to
-    no-op, so a conversation that doesn't override them contributes nothing."""
+def test_conversation_hook_seams_are_off_protocol_optin() -> None:
+    """before_tool / before_finish / run_context are opt-in seams, NOT members
+    of the Conversation Protocol — a minimal conversation that omits them still
+    conforms, and they're simply absent (the loop reaches them via getattr with
+    a no-op fallback). active_tools stays the one Protocol-level default.
+    Keeping the seams off the Protocol is what stops their addition from
+    breaking every structural impl that doesn't define them."""
 
     class _Default(Conversation):
         async def build_prompt(
@@ -359,17 +363,13 @@ def test_conversation_protocol_decider_seams_default_none() -> None:
         def list_sessions(self) -> list[dict[str, object]]:
             return []
 
-    async def go() -> None:
-        c = _Default()
-        ctx = HookContext(
-            event="before_tool", run_context={}, messages=[], run_effect=passthrough_effect
-        )
-        assert c.active_tools() == set()
-        assert await c.before_tool(ctx) is None
-        assert await c.before_finish(ctx) is None
-        assert c.run_context() == {}
-
-    asyncio.run(go())
+    c = _Default()
+    assert isinstance(c, Conversation)  # minimal impl conforms
+    assert c.active_tools() == set()  # the one Protocol-level default
+    # The hook seams are absent (not inherited) — opt-in only.
+    assert getattr(c, "before_tool", None) is None
+    assert getattr(c, "before_finish", None) is None
+    assert getattr(c, "run_context", None) is None
 
 
 class _ThrowingConv:

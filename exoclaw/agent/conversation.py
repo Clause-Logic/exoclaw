@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from exoclaw.agent.hooks import HookRegistration
 
 
 @runtime_checkable
@@ -69,6 +72,29 @@ class Conversation(Protocol):
         the current turn.  Return an empty set to suppress all optional tools.
         """
         return set()
+
+    def active_hooks(self, event: str) -> list[HookRegistration]:
+        """Return the lifecycle hooks active for the current turn at ``event``.
+
+        Optional hook — sibling to ``active_tools``. The agent loop calls it
+        at each lifecycle seam (``before_tool``, ``before_finish``) and runs
+        the returned handlers in priority order. A skill-aware Conversation
+        returns the hooks its active skills registered, so behaviour is
+        conditioned on the loaded skills — but core stays blind to skills, it
+        only sees ``(handler, priority)`` pairs. Return an empty list to fire
+        nothing.
+        """
+        return []
+
+    def run_context(self) -> dict[str, Any]:
+        """Return the per-run context bag exposed to hooks via
+        ``HookContext.run_context``.
+
+        Optional. Lets the host surface authoritative per-run values (e.g. a
+        cycle id minted before the turn) so a hook can read them instead of
+        trusting the model's tool args. Defaults to empty.
+        """
+        return {}
 
     # NOTE: ``recover_from_overflow`` lives on concrete Conversation
     # implementations as an optional method rather than on this Protocol.

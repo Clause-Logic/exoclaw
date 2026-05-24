@@ -328,7 +328,10 @@ class AgentLoop:
             try:
                 candidate = rc()
                 if isinstance(candidate, dict):
-                    run_context = candidate
+                    # Shallow copy: read-only context for hooks. A decider
+                    # mutating ctx.run_context must not touch the conversation's
+                    # bag or leak into later seams (same posture as messages).
+                    run_context = dict(candidate)
             except Exception:
                 self._log.exception("run_context_error")
 

@@ -186,6 +186,29 @@ def test_loop_before_tool_inplace_param_mutation_does_not_change_call() -> None:
     asyncio.run(go())
 
 
+def test_loop_hook_cannot_corrupt_run_context() -> None:
+    """A decider mutating ``ctx.run_context`` must not touch the conversation's
+    own bag — the loop hands the decider a shallow copy, not the live dict."""
+
+    async def go() -> None:
+        async def scribble(ctx: HookContext) -> None:
+            ctx.run_context["evil"] = "injected"  # in-place
+            return None
+
+        conv = _Conv(before_tool=scribble, run_ctx={"cycle_id": "C1"})
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_Provider([_tool_call(args={"q": "x"}), LLMResponse(content="final")]),
+            conversation=conv,
+            tools=[_RecordingTool()],
+        )
+        out = await loop.process_direct("go")
+        assert out == "final"
+        assert conv._run_ctx == {"cycle_id": "C1"}  # source bag untouched
+
+    asyncio.run(go())
+
+
 def test_loop_hook_cannot_corrupt_transcript_via_messages() -> None:
     """A decider that mutates ``ctx.messages`` must NOT change what the provider
     sees on later iterations — messages is a read-only per-dict copy of the

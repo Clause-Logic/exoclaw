@@ -1,12 +1,13 @@
-"""Tests for the skill-blind lifecycle-hook contract (exoclaw.agent.hooks)
-and its wiring into AgentLoop.
+"""Tests for the generic lifecycle-hook contract (exoclaw.agent.hooks) and its
+wiring into AgentLoop.
 
-Core is skill-blind: the loop only consults ``Conversation.active_hooks(event)``
-— it never sees a "skill". These tests use a skill-blind stub conversation
-that returns hooks conditionally, proving the loop fires them, applies
+Core is agnostic about what produces hooks: the loop only consults
+``Conversation.active_hooks(event)``. These tests use a stub conversation that
+returns hooks conditionally, proving the loop fires them, applies
 mutate/veto/inject, exposes ``run_context`` + ``run_effect``, and that an
 absent/empty ``active_hooks`` fires nothing (so existing conversations are
-unaffected). The actual skill→hook gating is tested in the conversation plugin.
+unaffected). What decides activation belongs to the consumer and is tested
+there.
 """
 
 from __future__ import annotations
@@ -129,7 +130,7 @@ def test_before_finish_highest_priority_nonempty_wins() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Loop integration via a skill-blind stub conversation
+# Loop integration via a stub conversation
 # ---------------------------------------------------------------------------
 
 
@@ -151,8 +152,8 @@ class _Provider:
 
 
 class _Conv:
-    """Skill-blind: just returns whatever active_hooks/run_context it was
-    handed. Stands in for a skill-aware conversation without core knowing."""
+    """Just returns whatever active_hooks/run_context it was handed — stands in
+    for a consumer that opts into hooks, without core knowing what's behind it."""
 
     def __init__(
         self,
@@ -376,7 +377,7 @@ def test_conversation_protocol_hook_seams_default_empty() -> None:
 
 class _ThrowingHooks:
     """Stub whose hook seams raise — the loop must treat them as no-ops, never
-    crash the turn (a buggy skill provider shouldn't take down a cycle)."""
+    crash the turn (a buggy hook provider shouldn't take down a turn)."""
 
     def __init__(self, raise_active: bool) -> None:
         self._raise_active = raise_active

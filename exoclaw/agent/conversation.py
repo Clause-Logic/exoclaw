@@ -66,10 +66,11 @@ class Conversation(Protocol):
     def active_tools(self) -> set[str]:
         """Return the set of optional tool names to surface for the current turn.
 
-        Optional hook — implementations that don't need skill-scoped tool
+        Optional hook — implementations that don't need per-turn tool
         activation can omit this method.  The agent loop calls it (if present)
-        after build_prompt() so the result reflects the skills resolved for
-        the current turn.  Return an empty set to suppress all optional tools.
+        after build_prompt() so the result reflects whatever the conversation
+        resolved for the current turn.  Return an empty set to suppress all
+        optional tools.
         """
         return set()
 
@@ -78,11 +79,10 @@ class Conversation(Protocol):
 
         Optional hook — sibling to ``active_tools``. The agent loop calls it
         at each lifecycle seam (``before_tool``, ``before_finish``) and runs
-        the returned handlers in priority order. A skill-aware Conversation
-        returns the hooks its active skills registered, so behaviour is
-        conditioned on the loaded skills — but core stays blind to skills, it
-        only sees ``(handler, priority)`` pairs. Return an empty list to fire
-        nothing.
+        the returned handlers in priority order. A Conversation that opts in
+        returns whatever hooks it considers active this turn, so behaviour can
+        be made conditional — but core stays agnostic, it only sees
+        ``(handler, priority)`` pairs. Return an empty list to fire nothing.
         """
         return []
 

@@ -975,11 +975,11 @@ def test_on_before_finish_injects_then_ends():
     asyncio.run(_go())
 
 
-# ── skill-scoped lifecycle hooks (exoclaw.agent.hooks) under MicroPython ──────
+# ── lifecycle hooks (exoclaw.agent.hooks) under MicroPython ──────────────────
 
 
 class _HookConv:
-    """Skill-blind conversation that surfaces active_hooks + run_context."""
+    """Conversation that surfaces active_hooks + run_context."""
 
     def __init__(self, hooks=None, run_ctx=None):
         self._hooks = hooks or {}
@@ -1027,7 +1027,7 @@ def _tool_call_resp(name="do", args=None):
     )
 
 
-def test_skill_before_tool_hook_stamps_and_runs_effect():
+def test_before_tool_hook_stamps_and_runs_effect():
     """A before_tool hook reads run_context, runs a side effect via
     run_effect, and stamps the authoritative value onto the tool args."""
 
@@ -1061,7 +1061,7 @@ def test_skill_before_tool_hook_stamps_and_runs_effect():
     asyncio.run(_go())
 
 
-def test_skill_before_tool_hook_vetoes():
+def test_before_tool_hook_vetoes():
     async def _go():
         tool = _RecTool()
 
@@ -1082,7 +1082,7 @@ def test_skill_before_tool_hook_vetoes():
     asyncio.run(_go())
 
 
-def test_skill_before_finish_hook_injects():
+def test_before_finish_hook_injects():
     async def _go():
         seen = []
 
@@ -1135,7 +1135,7 @@ class _ThrowingHookConv:
         raise RuntimeError("boom")
 
 
-def test_skill_throwing_active_hooks_is_noop():
+def test_throwing_active_hooks_is_noop():
     async def _go():
         tool = _RecTool()
         loop = AgentLoop(
@@ -1153,7 +1153,7 @@ def test_skill_throwing_active_hooks_is_noop():
     asyncio.run(_go())
 
 
-def test_skill_throwing_run_context_is_noop():
+def test_throwing_run_context_is_noop():
     async def _go():
         tool = _RecTool()
         loop = AgentLoop(

@@ -559,10 +559,10 @@ class AgentLoop:
                                 sk,
                             )
                         if not rejection:
-                            # Skill-scoped before_tool hooks active for this
-                            # turn (via the Conversation). They compose with
-                            # the global on_pre_tool: each may further mutate
-                            # the args or veto the call.
+                            # before_tool hooks active for this turn (via the
+                            # Conversation). They compose with the global
+                            # on_pre_tool: each may further mutate the args or
+                            # veto the call.
                             bt_hooks = self._active_hooks(BEFORE_TOOL)
                             if bt_hooks:
                                 bt = await dispatch_before_tool(
@@ -679,8 +679,8 @@ class AgentLoop:
                         self._on_before_finish, clean or "", list(tools_used), sk
                     )
                 if not followup:
-                    # Skill-scoped before_finish hooks active for this turn
-                    # (via the Conversation). They compose with the global
+                    # before_finish hooks active for this turn (via the
+                    # Conversation). They compose with the global
                     # on_before_finish: highest-priority non-empty wins.
                     bf_hooks = self._active_hooks(BEFORE_FINISH)
                     if bf_hooks:
@@ -1199,8 +1199,9 @@ class AgentLoop:
         ``None`` (the default) to inherit from the loop.
 
         Extra keyword arguments are forwarded to conversation.build_prompt,
-        allowing callers to pass domain-specific context (e.g. skill_names,
-        turn_context) without the loop needing to know about them.
+        allowing callers to pass domain-specific context (extra kwargs the
+        conversation backend understands) without the loop needing to know
+        about them.
         """
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         # Callers of ``process_direct`` read the returned content — they

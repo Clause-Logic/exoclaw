@@ -1,20 +1,20 @@
-"""Agent lifecycle hooks — the generic, skill-blind contract.
+"""Agent lifecycle hooks — the generic contract.
 
 The agent loop fires hooks at lifecycle seams (currently ``before_tool`` and
 ``before_finish``) and asks the Conversation which hooks are active for the
 current turn — exactly the way it already asks ``Conversation.active_tools()``
-which optional tools to advertise. Core does NOT know where those hooks come
-from; in practice a skill-aware Conversation returns the hooks its active
-skills registered, but **the skill concept lives entirely in the conversation
-layer, not here.** Core only defines: the context handed to a hook, the
-decision shapes a hook returns, and the priority-ordered dispatch.
+which optional tools to advertise. Core does NOT know or care where those hooks
+come from: a consumer reports them per turn, and core only defines the context
+handed to a hook, the decision shapes a hook returns, and the priority-ordered
+dispatch. What decides activation (and what produces the hooks) lives entirely
+in the consumer.
 
 The contract (events, decision shapes, priority-ordered merge) is ported from
 openclaw's plugin hook system. Two things differ: openclaw's plugin hooks are
 always-on globals, whereas here activation is whatever the Conversation reports
-per turn (so a skill-aware Conversation makes them conditional); and a hook
-reaches back into the runtime through an in-process ``HookContext`` rather than
-a foreign script.
+per turn (so a consumer can make them conditional); and a hook reaches back
+into the runtime through an in-process ``HookContext`` rather than a foreign
+script.
 
 ``HookContext`` is the hook's only door back into the runtime. Keeping I/O
 behind ``run_effect`` means a hook author writes plain async code and can't
@@ -93,8 +93,8 @@ if not IS_MICROPYTHON:  # pragma: no cover (micropython)
         """One active hook: its handler and a priority (higher runs first).
 
         What ``Conversation.active_hooks(event)`` returns. Core treats it as an
-        opaque (handler, priority) pair — it does not know the conversation
-        derived it from a loaded skill.
+        opaque (handler, priority) pair — it does not know or care what produced
+        it.
         """
 
         handler: HookHandler

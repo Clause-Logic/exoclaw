@@ -342,13 +342,15 @@ def test_loop_fires_nothing_when_conversation_has_no_deciders() -> None:
 
 def test_conversation_hook_seams_are_off_protocol_optin() -> None:
     """before_tool / before_finish / run_context are opt-in seams, NOT members
-    of the Conversation Protocol — a minimal conversation that omits them still
-    conforms, and they're simply absent (the loop reaches them via getattr with
-    a no-op fallback). active_tools stays the one Protocol-level default.
-    Keeping the seams off the Protocol is what stops their addition from
-    breaking every structural impl that doesn't define them."""
+    of the Conversation Protocol. ``_Plain`` deliberately does NOT inherit
+    Conversation — it's a structural impl mirroring exoclaw-turn's
+    ``_EphemeralConversation`` (the real impl whose conformance 0.30.0 broke by
+    putting the seams on the Protocol). It implements the required surface
+    (incl. active_tools) and omits the seams; the ``Conversation`` annotation
+    statically pins that this still conforms, and the loop reaches the seams via
+    getattr with a no-op fallback so they stay absent here."""
 
-    class _Default(Conversation):
+    class _Plain:  # no Conversation base — exercises structural conformance
         async def build_prompt(
             self, session_id: str, message: str, **kw: object
         ) -> list[dict[str, object]]:
@@ -363,10 +365,12 @@ def test_conversation_hook_seams_are_off_protocol_optin() -> None:
         def list_sessions(self) -> list[dict[str, object]]:
             return []
 
-    c = _Default()
-    assert isinstance(c, Conversation)  # minimal impl conforms
-    assert c.active_tools() == set()  # the one Protocol-level default
-    # The hook seams are absent (not inherited) — opt-in only.
+        def active_tools(self) -> set[str]:
+            return set()
+
+    c: Conversation = _Plain()  # ty statically verifies structural conformance
+    assert isinstance(c, Conversation)  # runtime_checkable structural check
+    # The hook seams are simply absent — opt-in only, reached via getattr.
     assert getattr(c, "before_tool", None) is None
     assert getattr(c, "before_finish", None) is None
     assert getattr(c, "run_context", None) is None

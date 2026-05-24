@@ -13,10 +13,14 @@ Pure-Python — runs under ``tests/_micropython_runner/run.py``.
 
 import asyncio
 
+from exoclaw.agent.hooks import (
+    BeforeFinishResult,
+    BeforeToolResult,
+)
 from exoclaw.agent.loop import AgentLoop
 from exoclaw.bus.events import InboundMessage
 from exoclaw.bus.queue import MessageBus
-from exoclaw.providers.types import LLMResponse
+from exoclaw.providers.types import LLMResponse, ToolCallRequest
 
 
 class _StubProvider:
@@ -964,5 +968,201 @@ def test_on_before_finish_injects_then_ends():
         # First stop nudged → loop continued; ended on the second response.
         assert content == "done"
         assert seen == ["partial", "done"]
+
+    asyncio.run(_go())
+
+
+# ── lifecycle hooks (exoclaw.agent.hooks) under MicroPython ──────────────────
+
+
+class _HookConv:
+    """Conversation that delegates the decider seams + surfaces run_context."""
+
+    def __init__(self, before_tool=None, before_finish=None, run_ctx=None):
+        self._bt = before_tool
+        self._bf = before_finish
+        self._run_ctx = run_ctx or {}
+
+    async def build_prompt(self, sid, message, **kw):
+        return [{"role": "user", "content": message}]
+
+    async def record(self, sid, msgs):
+        pass
+
+    async def clear(self, sid):
+        return True
+
+    def list_sessions(self):
+        return []
+
+    def run_context(self):
+        return self._run_ctx
+
+    async def before_tool(self, ctx):
+        return await self._bt(ctx) if self._bt else None
+
+    async def before_finish(self, ctx):
+        return await self._bf(ctx) if self._bf else None
+
+
+class _RecTool:
+    name = "do"
+    description = "d"
+    parameters = {"type": "object", "properties": {}}
+
+    def __init__(self):
+        self.received = None
+        self.executed = False
+
+    async def execute(self, **kwargs):
+        self.executed = True
+        self.received = kwargs
+        return "ok"
+
+
+def _tool_call_resp(name="do", args=None):
+    return LLMResponse(
+        content="",
+        tool_calls=[ToolCallRequest(id="t1", name=name, arguments=args or {})],
+        finish_reason="tool_calls",
+    )
+
+
+def test_before_tool_decider_stamps_and_runs_effect():
+    """A before_tool decider reads run_context, runs a side effect via
+    run_effect, and stamps the authoritative value onto the tool args."""
+
+    async def _go():
+        tool = _RecTool()
+        effects = []
+
+        async def stamp(ctx):
+            async def _eff():
+                effects.append(1)
+
+            await ctx.run_effect(_eff)
+            p = dict(ctx.params or {})
+            p["cycle_id"] = ctx.run_context.get("cycle_id")
+            return BeforeToolResult(params=p)
+
+        conv = _HookConv(before_tool=stamp, run_ctx={"cycle_id": "C1"})
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StubProvider(
+                [_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]
+            ),
+            conversation=conv,
+            tools=[tool],
+        )
+        out = await loop.process_direct("go")
+        assert out == "final"
+        assert tool.received == {"q": "x", "cycle_id": "C1"}
+        assert effects == [1]
+
+    asyncio.run(_go())
+
+
+def test_before_tool_decider_vetoes():
+    async def _go():
+        tool = _RecTool()
+
+        async def veto(ctx):
+            return BeforeToolResult(block=True, block_reason="no")
+
+        conv = _HookConv(before_tool=veto)
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StubProvider([_tool_call_resp(), LLMResponse(content="final")]),
+            conversation=conv,
+            tools=[tool],
+        )
+        out = await loop.process_direct("go")
+        assert out == "final"
+        assert tool.executed is False
+
+    asyncio.run(_go())
+
+
+def test_before_finish_decider_injects():
+    async def _go():
+        seen = []
+
+        async def nudge(ctx):
+            seen.append(1)
+            return BeforeFinishResult(continue_message="keep going" if len(seen) == 1 else None)
+
+        conv = _HookConv(before_finish=nudge)
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StubProvider([LLMResponse(content="partial"), LLMResponse(content="done")]),
+            conversation=conv,
+        )
+        out = await loop.process_direct("go")
+        assert out == "done"
+        assert len(seen) == 2
+
+    asyncio.run(_go())
+
+
+class _ThrowingHookConv:
+    """Decider seams (and run_context) raise — the loop must treat them as
+    no-ops, never crash the turn."""
+
+    def __init__(self, raise_before_tool):
+        self._raise_before_tool = raise_before_tool
+
+    async def build_prompt(self, sid, message, **kw):
+        return [{"role": "user", "content": message}]
+
+    async def record(self, sid, msgs):
+        pass
+
+    async def clear(self, sid):
+        return True
+
+    def list_sessions(self):
+        return []
+
+    async def before_tool(self, ctx):
+        if self._raise_before_tool:
+            raise RuntimeError("boom")
+        return None
+
+    def run_context(self):
+        raise RuntimeError("boom")
+
+
+def test_throwing_before_tool_is_noop():
+    async def _go():
+        tool = _RecTool()
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StubProvider(
+                [_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]
+            ),
+            conversation=_ThrowingHookConv(raise_before_tool=True),
+            tools=[tool],
+        )
+        out = await loop.process_direct("go")
+        assert out == "final"
+        assert tool.executed
+
+    asyncio.run(_go())
+
+
+def test_throwing_run_context_is_noop():
+    async def _go():
+        tool = _RecTool()
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StubProvider(
+                [_tool_call_resp(args={"q": "x"}), LLMResponse(content="final")]
+            ),
+            conversation=_ThrowingHookConv(raise_before_tool=False),
+            tools=[tool],
+        )
+        out = await loop.process_direct("go")
+        assert out == "final"
+        assert tool.executed
 
     asyncio.run(_go())

@@ -986,6 +986,22 @@ class DirectExecutor:
     ) -> object:
         return await fn(*args, **kwargs)
 
+    async def run_effect(
+        self,
+        fn: Callable[..., Awaitable[object]],
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        """Run a side-effecting async callable that a lifecycle hook dispatched
+        (``HookContext.run_effect``). Pass-through here — the effect runs
+        inline. Durable executors (DBOS, Temporal) override this to wrap the
+        call in a journaled step/activity so a hook's I/O replays exactly
+        once on crash recovery. Kept off the ``Executor`` Protocol (same
+        reasoning as ``recover_from_overflow``): it's an additive opt-in, and
+        the agent loop reaches it via ``getattr`` with an inline fallback.
+        """
+        return await fn(*args, **kwargs)
+
     async def mint_turn_id(self) -> str:
         return _uuid7()
 

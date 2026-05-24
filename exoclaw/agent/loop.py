@@ -28,6 +28,14 @@ from exoclaw._compat import (
     monotonic_ms as _module_monotonic_ms,
 )
 from exoclaw.agent.conversation import Conversation
+from exoclaw.agent.hooks import (
+    BEFORE_FINISH,
+    BEFORE_TOOL,
+    BeforeFinishResult,
+    BeforeToolResult,
+    HookContext,
+    passthrough_effect,
+)
 from exoclaw.agent.tools.protocol import Tool, ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
 from exoclaw.bus.events import InboundMessage, OutboundMessage
@@ -292,6 +300,56 @@ class AgentLoop:
 
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    async def _call_decider(self, method: str, event: str, **fields: Any) -> Any:
+        """Call an optional Conversation decider (``before_tool`` /
+        ``before_finish``) with a freshly built HookContext, and return its
+        decision (or None).
+
+        Reached via ``getattr`` so a Conversation that doesn't implement the
+        optional async method simply contributes nothing. Anything that goes
+        wrong — a non-awaitable test double, or a decider that raises — is
+        logged and treated as no-op, so a buggy consumer can't take down the
+        turn. (No ``__await__`` pre-check: MicroPython coroutines don't expose
+        it, so we just await and let the try/except catch a non-coroutine.)"""
+        fn = getattr(self.conversation, method, None)
+        if fn is None:
+            return None
+        try:
+            return await fn(self._make_hook_context(event, **fields))
+        except Exception:
+            self._log.exception("hook_decider_error", **{"hook.event": event})
+            return None
+
+    def _make_hook_context(self, event: str, **fields: Any) -> HookContext:
+        """Build the HookContext for a seam: the per-run bag (from the
+        Conversation), the live transcript, and the executor-backed
+        ``run_effect`` so a hook's I/O is journaled by durable executors."""
+        run_context: dict[str, Any] = {}
+        rc = getattr(self.conversation, "run_context", None)
+        if rc is not None:
+            try:
+                candidate = rc()
+                if isinstance(candidate, dict):
+                    run_context = candidate
+            except Exception:
+                self._log.exception("run_context_error")
+
+        # Executor-backed so durable executors journal a hook's I/O; falls
+        # back to inline for executors predating run_effect.
+        run_effect = getattr(self._executor, "run_effect", passthrough_effect)
+
+        return HookContext(
+            event=event,
+            run_context=run_context,
+            # Per-dict copy: messages is a read-only transcript for hooks.
+            # load_messages() returns fresh list but the SAME dict objects as
+            # the executor's in-flight buffer, so a hook mutating one would
+            # corrupt what the provider sees next iteration.
+            messages=[dict(m) for m in self._executor.load_messages()],
+            run_effect=run_effect,
+            **fields,
+        )
+
     async def _should_continue(self, iteration: int, tools_used: list[str]) -> bool:
         """Check whether the loop should keep iterating.
 
@@ -498,6 +556,7 @@ class AgentLoop:
                     # paths that never call the tool at all).
                     content_file = None
                     try:
+                        rejection = None
                         if self._on_pre_tool:
                             sk = self._current_ctx.session_key if self._current_ctx else ""
                             rejection = await self._executor.run_hook(
@@ -506,20 +565,37 @@ class AgentLoop:
                                 tool_call.arguments,
                                 sk,
                             )
-                            if rejection:
-                                status = "rejected"
-                                self._log.info(
-                                    "tool_reject",
-                                    **{
-                                        "tool.name": tool_call.name,
-                                        "tool.call_id": tool_call.id,
-                                    },
-                                    reason=str(rejection)[:100],
-                                )
-                                result = str(rejection)
-                                content_file = None
-                            else:
-                                result, content_file = await self._invoke_tool(tool_call)
+                        if not rejection:
+                            # before_tool decider (via the Conversation) composes
+                            # with the global on_pre_tool: it may further mutate
+                            # the args or veto the call. The Conversation owns
+                            # how any hooks behind it collapse into this result.
+                            bt = await self._call_decider(
+                                "before_tool",
+                                BEFORE_TOOL,
+                                tool_name=tool_call.name,
+                                # Copy: a decider mutating ctx.params in place
+                                # must NOT change the call — only an explicit
+                                # BeforeToolResult(params=...) does (applied below).
+                                params=dict(tool_call.arguments),
+                            )
+                            if isinstance(bt, BeforeToolResult):
+                                if bt.params is not None:
+                                    tool_call.arguments = bt.params
+                                if bt.block:
+                                    rejection = bt.block_reason or "blocked"
+                        if rejection:
+                            status = "rejected"
+                            self._log.info(
+                                "tool_reject",
+                                **{
+                                    "tool.name": tool_call.name,
+                                    "tool.call_id": tool_call.id,
+                                },
+                                reason=str(rejection)[:100],
+                            )
+                            result = str(rejection)
+                            content_file = None
                         else:
                             result, content_file = await self._invoke_tool(tool_call)
                     except Exception as e:
@@ -598,6 +674,7 @@ class AgentLoop:
                 # both the in-memory buffer the provider reads and the durable
                 # store) and the loop continues; None/empty ends the turn. The
                 # host owns the stopping condition; ``max_iterations`` backstops.
+                followup: object = None
                 if self._on_before_finish:
                     # Prefer the loop's own ``session_id`` — it's set on every
                     # real path (``_process_turn_inline`` passes it). ``_current_ctx``
@@ -608,12 +685,23 @@ class AgentLoop:
                     followup = await self._executor.run_hook(
                         self._on_before_finish, clean or "", list(tools_used), sk
                     )
-                    if followup:
-                        nudge: dict[str, object] = {"role": "user", "content": str(followup)}
-                        self._executor.append_messages([nudge])
-                        await _flush(nudge)
-                        self._log.info("turn_continue", reason="before_finish")
-                        continue
+                if not followup:
+                    # before_finish decider (via the Conversation) composes with
+                    # the global on_before_finish.
+                    bf = await self._call_decider(
+                        "before_finish",
+                        BEFORE_FINISH,
+                        final_content=clean or "",
+                        tools_used=list(tools_used),
+                    )
+                    if isinstance(bf, BeforeFinishResult):
+                        followup = bf.continue_message
+                if followup:
+                    nudge: dict[str, object] = {"role": "user", "content": str(followup)}
+                    self._executor.append_messages([nudge])
+                    await _flush(nudge)
+                    self._log.info("turn_continue", reason="before_finish")
+                    continue
                 final_content = clean
                 break
 
@@ -1114,8 +1202,9 @@ class AgentLoop:
         ``None`` (the default) to inherit from the loop.
 
         Extra keyword arguments are forwarded to conversation.build_prompt,
-        allowing callers to pass domain-specific context (e.g. skill_names,
-        turn_context) without the loop needing to know about them.
+        allowing callers to pass domain-specific context (extra kwargs the
+        conversation backend understands) without the loop needing to know
+        about them.
         """
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         # Callers of ``process_direct`` read the returned content — they

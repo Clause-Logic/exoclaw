@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from exoclaw.agent.hooks import BeforeFinishResult, BeforeToolResult, HookContext
 
 
 @runtime_checkable
@@ -63,12 +66,42 @@ class Conversation(Protocol):
     def active_tools(self) -> set[str]:
         """Return the set of optional tool names to surface for the current turn.
 
-        Optional hook — implementations that don't need skill-scoped tool
+        Optional hook — implementations that don't need per-turn tool
         activation can omit this method.  The agent loop calls it (if present)
-        after build_prompt() so the result reflects the skills resolved for
-        the current turn.  Return an empty set to suppress all optional tools.
+        after build_prompt() so the result reflects whatever the conversation
+        resolved for the current turn.  Return an empty set to suppress all
+        optional tools.
         """
         return set()
+
+    async def before_tool(self, ctx: HookContext) -> BeforeToolResult | None:
+        """Decide what to do before a tool call. Optional — sibling to
+        ``active_tools``. The agent loop builds the ``HookContext`` and calls
+        this before each tool dispatch; return a ``BeforeToolResult`` to
+        replace the tool's args (``params``) or veto the call (``block`` +
+        ``block_reason``), or ``None`` to leave it unchanged. The consumer owns
+        whether anything fires and how multiple hooks compose into this one
+        result — core just applies it.
+        """
+        return None
+
+    async def before_finish(self, ctx: HookContext) -> BeforeFinishResult | None:
+        """Decide what to do when the model ends a turn with no tool calls.
+        Optional. Return a ``BeforeFinishResult`` with a non-empty
+        ``continue_message`` to re-prompt (the loop appends it as a user turn
+        and continues), or ``None`` to let the turn end.
+        """
+        return None
+
+    def run_context(self) -> dict[str, Any]:
+        """Return the per-run context bag exposed to hooks via
+        ``HookContext.run_context``.
+
+        Optional. Lets the host surface authoritative per-run values (e.g. a
+        cycle id minted before the turn) so a hook can read them instead of
+        trusting the model's tool args. Defaults to empty.
+        """
+        return {}
 
     # NOTE: ``recover_from_overflow`` lives on concrete Conversation
     # implementations as an optional method rather than on this Protocol.

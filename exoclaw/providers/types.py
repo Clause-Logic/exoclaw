@@ -45,6 +45,12 @@ if not IS_MICROPYTHON:  # pragma: no cover (micropython)
         usage: dict[str, int] = field(default_factory=dict)
         reasoning_content: str | None = None
         thinking_blocks: list[dict[str, object]] | None = None
+        # Billed cost in USD for this call, and the service tier the provider
+        # actually served. Separate from ``usage`` because that's int-only
+        # tokens; cost is a float and tier is a string. None when the provider
+        # didn't report them (e.g. usage-accounting not requested).
+        cost: float | None = None
+        service_tier: str | None = None
 
         @property
         def has_tool_calls(self) -> bool:
@@ -71,6 +77,8 @@ else:  # pragma: no cover (cpython)
             usage: dict[str, int] | None = None,
             reasoning_content: str | None = None,
             thinking_blocks: list[dict[str, object]] | None = None,
+            cost: float | None = None,
+            service_tier: str | None = None,
         ) -> None:
             self.content = content
             self.tool_calls = tool_calls if tool_calls is not None else []
@@ -78,6 +86,8 @@ else:  # pragma: no cover (cpython)
             self.usage = usage if usage is not None else {}
             self.reasoning_content = reasoning_content
             self.thinking_blocks = thinking_blocks
+            self.cost = cost
+            self.service_tier = service_tier
 
         @property
         def has_tool_calls(self) -> bool:

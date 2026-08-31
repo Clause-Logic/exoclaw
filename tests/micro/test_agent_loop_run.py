@@ -45,6 +45,19 @@ class _RaisingProvider:
         raise self._exc
 
 
+class _StreamingProvider:
+    """Emits one content fragment before returning its materialized reply."""
+
+    def get_default_model(self):
+        return "m"
+
+    async def chat(self, messages, tools=None, model=None, **kw):
+        on_delta = kw.get("on_delta")
+        if on_delta:
+            await on_delta("visible fragment")
+        return LLMResponse(content="visible fragment")
+
+
 class _MemConv:
     def __init__(self):
         self._messages = []
@@ -109,6 +122,30 @@ def test_stop_signal_cancels_run_loop():
         loop.stop()
         # Loop has 1.0s ``consume_inbound`` timeout — give it 2x.
         await asyncio.wait_for(run_task, timeout=3.0)
+
+    asyncio.run(_go())
+
+
+def test_process_turn_forwards_provider_fragments_to_on_delta():
+    """The opt-in callback receives fragments plus a final response boundary."""
+
+    async def _go():
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StreamingProvider(),
+            conversation=_MemConv(),
+        )
+        events = []
+
+        async def _on_delta(content, **event):
+            events.append((content, event))
+
+        content, _ = await loop.process_turn("s", "go", on_delta=_on_delta)
+        assert content == "visible fragment"
+        assert events == [
+            ("visible fragment", {}),
+            ("", {"stream_end": True, "stream_final": True}),
+        ]
 
     asyncio.run(_go())
 

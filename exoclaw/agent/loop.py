@@ -382,6 +382,9 @@ class AgentLoop:
                     if on_delta:
                         await on_delta(piece)
 
+                chat_kwargs: dict[str, object] = {}
+                if on_delta:
+                    chat_kwargs["on_delta"] = _on_delta
                 response = await self._executor.chat(
                     self.provider,
                     messages=messages,
@@ -390,7 +393,7 @@ class AgentLoop:
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                     reasoning_effort=self.reasoning_effort,
-                    on_delta=_on_delta if on_delta else None,
+                    **chat_kwargs,  # type: ignore[arg-type]
                 )
             except ContextWindowExceededError:
                 if recovery_attempts >= self._max_recovery_attempts:
@@ -644,20 +647,39 @@ class AgentLoop:
 
         Returns ``(final_content, new_messages)``.
         """
-        result = await self._executor.run_turn(
-            self,
-            session_id,
-            message,
-            channel=channel,
-            chat_id=chat_id,
-            media=media,
-            plugin_context=plugin_context,
-            on_progress=on_progress,
-            on_delta=on_delta,
-            model=model,
-            publish_response=publish_response,
-            **kwargs,
-        )
+        if on_delta:
+            result = await self._executor.run_turn(
+                self,
+                session_id,
+                message,
+                channel=channel,
+                chat_id=chat_id,
+                media=media,
+                plugin_context=plugin_context,
+                on_progress=on_progress,
+                on_delta=on_delta,
+                model=model,
+                publish_response=publish_response,
+                **kwargs,
+            )
+        else:
+            # ``on_delta`` is additive. Existing durable executors must not
+            # receive an unknown keyword for ordinary non-streaming turns.
+            result = await self._executor.run_turn(
+                self,
+                session_id,
+                message,
+                channel=channel,
+                chat_id=chat_id,
+                media=media,
+                plugin_context=plugin_context,
+                on_progress=on_progress,
+                model=model,
+                publish_response=publish_response,
+                # ``process_turn`` consumes its own ``on_delta`` argument;
+                # the remaining build-prompt kwargs cannot contain it.
+                **kwargs,  # type: ignore[arg-type]
+            )
         if result is not None:
             return result
         return await self._process_turn_inline(

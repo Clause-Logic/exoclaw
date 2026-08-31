@@ -197,6 +197,34 @@ class TestRunAgentLoop:
         assert final == "hello"
         assert tools_used == []
 
+    async def test_legacy_executor_chat_receives_no_delta_keyword_by_default(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response(content="hello"))
+
+        async def legacy_chat(
+            provider: object,
+            *,
+            messages: list[dict[str, object]],
+            tools: list[dict[str, object]] | None = None,
+            model: str | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            reasoning_effort: str | None = None,
+        ) -> MagicMock:
+            return await provider.chat(
+                messages=messages,
+                tools=tools,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+            )
+
+        loop._executor.chat = legacy_chat  # type: ignore[method-assign]
+        final, _, _ = await loop._run_agent_loop([{"role": "user", "content": "hi"}])
+
+        assert final == "hello"
+
     async def test_forwards_tokens_and_final_boundary_to_delta_callback(self) -> None:
         loop, _ = _make_loop()
 
@@ -416,6 +444,16 @@ class TestProcessTurn:
         assert len(new_msgs) >= 1
         assert any(m.get("role") == "assistant" for m in new_msgs)
         loop.conversation.record.assert_awaited_once()
+
+    async def test_legacy_run_turn_receives_no_delta_keyword_by_default(self) -> None:
+        loop, _ = _make_loop()
+        loop.provider.chat = AsyncMock(return_value=_make_response("done"))
+        legacy_run_turn = AsyncMock(return_value=None)
+        loop._executor.run_turn = legacy_run_turn  # type: ignore[method-assign]
+
+        await loop.process_turn("sess:1", "hi")
+
+        assert "on_delta" not in legacy_run_turn.call_args.kwargs
 
     async def test_forwards_kwargs_to_build_prompt(self) -> None:
         loop, _ = _make_loop()

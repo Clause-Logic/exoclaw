@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, TypeGuard, runtime_checkable
+from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, TypeGuard, cast, runtime_checkable
 
 from exoclaw._compat import (
     IS_MICROPYTHON,
@@ -25,7 +25,7 @@ from exoclaw._compat import (
 from exoclaw.agent.conversation import AppendableConversation, Conversation
 from exoclaw.agent.tools.protocol import ToolContext
 from exoclaw.agent.tools.registry import ToolRegistry
-from exoclaw.providers.protocol import LLMProvider
+from exoclaw.providers.protocol import LLMProvider, StreamingLLMProvider
 from exoclaw.providers.types import LLMResponse
 
 if not IS_MICROPYTHON:  # pragma: no cover (micropython)
@@ -679,20 +679,25 @@ class DirectExecutor:
         reasoning_effort: str | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        kwargs: dict[str, object] = {
-            "messages": messages,
-            "tools": tools,
-            "model": model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "reasoning_effort": reasoning_effort,
-        }
-        # ``on_delta`` is an additive opt-in.  Do not pass a new keyword to
-        # providers that do not implement streaming callbacks; third-party
-        # providers remain compatible with the pre-streaming protocol.
         if on_delta is not None:
-            kwargs["on_delta"] = on_delta
-        return await provider.chat(**kwargs)  # type: ignore[arg-type]
+            streaming_provider = cast(StreamingLLMProvider, provider)
+            return await streaming_provider.chat(
+                messages=messages,
+                tools=tools,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+                on_delta=on_delta,
+            )
+        return await provider.chat(
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
 
     async def execute_tool(
         self,

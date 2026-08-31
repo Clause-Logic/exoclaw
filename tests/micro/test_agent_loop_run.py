@@ -48,12 +48,14 @@ class _RaisingProvider:
 class _StreamingProvider:
     """Emits one content fragment before returning its materialized reply."""
 
+    supports_response_deltas = True
+
     def get_default_model(self):
         return "m"
 
     async def chat(self, messages, tools=None, model=None, **kw):
         on_delta = kw.get("on_delta")
-        if on_delta:
+        if on_delta is not None:
             await on_delta("visible fragment")
         return LLMResponse(content="visible fragment")
 

@@ -37,6 +37,18 @@ class TestDirectExecutorChat:
             reasoning_effort=None,
         )
 
+    async def test_forwards_delta_callback_only_when_requested(self) -> None:
+        executor = DirectExecutor()
+        provider = MagicMock()
+        provider.chat = AsyncMock(return_value=MagicMock())
+
+        async def on_delta(_: str) -> None:
+            pass
+
+        await executor.chat(provider, messages=[], on_delta=on_delta)
+
+        assert provider.chat.call_args.kwargs["on_delta"] is on_delta
+
 
 class TestDirectExecutorExecuteTool:
     async def test_delegates_to_registry(self) -> None:

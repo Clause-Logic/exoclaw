@@ -300,6 +300,7 @@ class Executor(Protocol):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         reasoning_effort: str | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse: ...
 
     async def execute_tool(
@@ -417,6 +418,7 @@ class Executor(Protocol):
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_delta: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
         publish_response: bool = False,
         **kwargs: list[str] | None,
@@ -675,15 +677,22 @@ class DirectExecutor:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         reasoning_effort: str | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        return await provider.chat(
-            messages=messages,
-            tools=tools,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reasoning_effort=reasoning_effort,
-        )
+        kwargs: dict[str, object] = {
+            "messages": messages,
+            "tools": tools,
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "reasoning_effort": reasoning_effort,
+        }
+        # ``on_delta`` is an additive opt-in.  Do not pass a new keyword to
+        # providers that do not implement streaming callbacks; third-party
+        # providers remain compatible with the pre-streaming protocol.
+        if on_delta is not None:
+            kwargs["on_delta"] = on_delta
+        return await provider.chat(**kwargs)  # type: ignore[arg-type]
 
     async def execute_tool(
         self,
@@ -1000,6 +1009,7 @@ class DirectExecutor:
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_delta: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
         publish_response: bool = False,
         **kwargs: list[str] | None,

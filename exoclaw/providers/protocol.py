@@ -1,6 +1,6 @@
 """LLMProvider protocol — the only provider surface core depends on."""
 
-from typing import Protocol, runtime_checkable
+from typing import Awaitable, Callable, Protocol, runtime_checkable
 
 from exoclaw.providers.types import LLMResponse, ResponseFormat
 
@@ -16,6 +16,7 @@ class LLMProvider(Protocol):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         response_format: ResponseFormat | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse: ...
 
     def get_default_model(self) -> str: ...

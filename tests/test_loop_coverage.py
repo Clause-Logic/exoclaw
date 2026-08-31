@@ -197,6 +197,33 @@ class TestRunAgentLoop:
         assert final == "hello"
         assert tools_used == []
 
+    async def test_forwards_tokens_and_final_boundary_to_delta_callback(self) -> None:
+        loop, _ = _make_loop()
+
+        async def stream_response(**kwargs: object) -> MagicMock:
+            on_delta = kwargs["on_delta"]
+            assert callable(on_delta)
+            await on_delta("hello ")
+            await on_delta("world")
+            return _make_response(content="hello world")
+
+        loop.provider.chat = stream_response
+        events: list[tuple[str, dict[str, object]]] = []
+
+        async def capture(content: str, **event: object) -> None:
+            events.append((content, event))
+
+        final, _, _ = await loop._run_agent_loop(
+            [{"role": "user", "content": "hi"}], on_delta=capture
+        )
+
+        assert final == "hello world"
+        assert events == [
+            ("hello ", {}),
+            ("world", {}),
+            ("", {"stream_end": True, "stream_final": True}),
+        ]
+
     async def test_model_override_reaches_provider(self) -> None:
         loop, _ = _make_loop()
         loop.provider.chat = AsyncMock(return_value=_make_response(content="ok"))
@@ -566,6 +593,39 @@ class TestProcessMessage:
 
         progress_msgs = [m for m in outbound if m.metadata and m.metadata.get("_progress")]
         assert not progress_msgs, "Expected no progress messages when on_progress=None"
+
+    async def test_stream_capability_publishes_transport_neutral_delta_events(self) -> None:
+        loop, bus = _make_loop()
+
+        async def stream_response(**kwargs: object) -> MagicMock:
+            on_delta = kwargs["on_delta"]
+            assert callable(on_delta)
+            await on_delta("visible")
+            return _make_response(content="visible")
+
+        loop.provider.chat = stream_response
+        outbound: list[OutboundMessage] = []
+        original_publish = bus.publish_outbound
+
+        async def capture(msg: OutboundMessage) -> None:
+            outbound.append(msg)
+            await original_publish(msg)
+
+        bus.publish_outbound = capture
+        msg = InboundMessage(
+            channel="test",
+            sender_id="u1",
+            chat_id="c1",
+            content="go",
+            metadata={"_stream_response": True},
+        )
+
+        await loop._process_message(msg)
+
+        stream_messages = [m for m in outbound if m.metadata and m.metadata.get("_stream_delta")]
+        assert [m.content for m in stream_messages] == ["visible", ""]
+        assert stream_messages[1].metadata["_stream_end"] is True
+        assert stream_messages[1].metadata["_stream_final"] is True
 
 
 # ---------------------------------------------------------------------------

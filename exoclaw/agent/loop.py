@@ -304,6 +304,7 @@ class AgentLoop:
         model: str | None = None,
         *,
         session_id: str | None = None,
+        on_delta: Callable[..., Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict[str, object]]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages).
 
@@ -334,6 +335,11 @@ class AgentLoop:
         message content reaching the provider.
 
         See ``docs/memory-model.md`` "Step A" for the history.
+
+        When ``on_delta`` is set, it receives each content fragment as soon
+        as the provider yields it. After a provider response that emitted
+        content, it receives an empty fragment with ``stream_end=True`` and
+        ``stream_final`` indicating whether that response requested tools.
         """
         iteration = 0
         final_content = None
@@ -368,6 +374,14 @@ class AgentLoop:
             )
             messages = self._executor.load_messages()
             try:
+                streamed = False
+
+                async def _on_delta(piece: str) -> None:
+                    nonlocal streamed
+                    streamed = True
+                    if on_delta:
+                        await on_delta(piece)
+
                 response = await self._executor.chat(
                     self.provider,
                     messages=messages,
@@ -376,6 +390,7 @@ class AgentLoop:
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                     reasoning_effort=self.reasoning_effort,
+                    on_delta=_on_delta if on_delta else None,
                 )
             except ContextWindowExceededError:
                 if recovery_attempts >= self._max_recovery_attempts:
@@ -420,6 +435,12 @@ class AgentLoop:
                     "and I couldn't recover. Try starting a new session."
                 )
                 break
+
+            if streamed and on_delta:
+                # The channel needs an explicit response boundary: a model
+                # can produce visible prose before asking for a tool, then
+                # produce the actual answer in a later LLM call.
+                await on_delta("", stream_end=True, stream_final=not response.has_tool_calls)
 
             if response.has_tool_calls:
                 if on_progress:
@@ -603,6 +624,7 @@ class AgentLoop:
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_delta: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
         publish_response: bool = False,
         **kwargs: list[str] | None,
@@ -616,6 +638,10 @@ class AgentLoop:
         ``model`` overrides ``self.model`` for this turn only; falls back to
         the loop default when ``None``.
 
+        ``on_delta`` is an optional provider-content callback. Durable
+        executors may forward it through their own execution boundary; the
+        direct executor invokes it inline.
+
         Returns ``(final_content, new_messages)``.
         """
         result = await self._executor.run_turn(
@@ -627,6 +653,7 @@ class AgentLoop:
             media=media,
             plugin_context=plugin_context,
             on_progress=on_progress,
+            on_delta=on_delta,
             model=model,
             publish_response=publish_response,
             **kwargs,
@@ -641,6 +668,7 @@ class AgentLoop:
             media=media,
             plugin_context=plugin_context,
             on_progress=on_progress,
+            on_delta=on_delta,
             model=model,
             **kwargs,
         )
@@ -655,6 +683,7 @@ class AgentLoop:
         media: list[str] | None = None,
         plugin_context: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_delta: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
         **kwargs: list[str] | None,
     ) -> tuple[str | None, list[dict[str, object]]]:
@@ -732,9 +761,20 @@ class AgentLoop:
                 # crash mid-turn still has the user's input on disk.
                 if initial:
                     await self._executor.append_message(self.conversation, session_id, initial[-1])
-            final_content, _, all_msgs = await self._run_agent_loop(
-                initial, on_progress=on_progress, model=model, session_id=session_id
-            )
+            if on_delta:
+                final_content, _, all_msgs = await self._run_agent_loop(
+                    initial,
+                    on_progress=on_progress,
+                    model=model,
+                    session_id=session_id,
+                    on_delta=on_delta,
+                )
+            else:
+                # Preserve the historic call shape for test shims and
+                # third-party extensions that replace ``_run_agent_loop``.
+                final_content, _, all_msgs = await self._run_agent_loop(
+                    initial, on_progress=on_progress, model=model, session_id=session_id
+                )
             new_msgs = all_msgs[len(initial) - 1 :]
             if prefer_append:
                 await self._executor.post_turn(self.conversation, session_id)
@@ -873,6 +913,7 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None | object = _UNSET,
+        on_delta: Callable[..., Awaitable[None]] | None | object = _UNSET,
         model: str | None = None,
         publish_response: bool = False,
         **kwargs: list[str] | None,
@@ -986,10 +1027,22 @@ class AgentLoop:
             if extra:
                 plugin_ctx.append(str(extra))
 
-        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+        async def _bus_progress(
+            content: str,
+            *,
+            tool_hint: bool = False,
+            stream_delta: bool = False,
+            stream_end: bool = False,
+            stream_final: bool = False,
+        ) -> None:
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
             meta["_tool_hint"] = tool_hint
+            if stream_delta:
+                meta["_stream_delta"] = True
+            if stream_end:
+                meta["_stream_end"] = True
+                meta["_stream_final"] = stream_final
             await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=msg.channel,
@@ -997,6 +1050,19 @@ class AgentLoop:
                     content=content,
                     metadata=meta,
                 )
+            )
+
+        async def _bus_delta(
+            content: str,
+            *,
+            stream_end: bool = False,
+            stream_final: bool = False,
+        ) -> None:
+            await _bus_progress(
+                content,
+                stream_delta=True,
+                stream_end=stream_end,
+                stream_final=stream_final,
             )
 
         # Use _bus_progress only when no on_progress was explicitly provided.
@@ -1011,6 +1077,15 @@ class AgentLoop:
             # 'NoneType'`` on MP's typing shim).
             else cast("Callable[..., Awaitable[None]] | None", on_progress)
         )
+        # Channels opt in through a transport-neutral message capability. The
+        # core turns provider events into ordinary outbound bus messages; a
+        # channel chooses how to render them (edits, chunks, terminal UI,
+        # etc.) without the agent loop knowing any channel names.
+        effective_delta: Callable[..., Awaitable[None]] | None = (
+            _bus_delta
+            if on_delta is _UNSET and bool((msg.metadata or {}).get("_stream_response"))
+            else cast("Callable[..., Awaitable[None]] | None", on_delta)
+        )
 
         final_content, new_msgs = await self.process_turn(
             sid,
@@ -1020,6 +1095,7 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             plugin_context=plugin_ctx or None,
             on_progress=effective_progress,
+            on_delta=effective_delta,
             model=model or msg.model_override,
             publish_response=publish_response,
             **kwargs,
@@ -1063,6 +1139,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        on_delta: Callable[..., Awaitable[None]] | None = None,
         model: str | None = None,
         **kwargs: list[str] | None,
     ) -> str:
@@ -1082,6 +1159,7 @@ class AgentLoop:
             msg,
             session_key=session_key,
             on_progress=on_progress,
+            on_delta=on_delta,
             model=model,
             publish_response=False,
             **kwargs,

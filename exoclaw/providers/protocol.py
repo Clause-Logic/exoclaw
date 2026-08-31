@@ -30,7 +30,14 @@ class LLMProvider(Protocol):
 
 
 class StreamingLLMProvider(LLMProvider, Protocol):
-    """Optional provider capability for visible content-delta streaming."""
+    """Optional provider capability for visible content-delta streaming.
+
+    Providers set ``supports_response_deltas = True`` to opt in at runtime;
+    the marker lets the executor preserve a normal non-streaming turn for
+    legacy providers when a channel asks for visible deltas.
+    """
+
+    supports_response_deltas: bool
 
     async def chat(
         self,

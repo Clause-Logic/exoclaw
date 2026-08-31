@@ -30,6 +30,7 @@ def _make_response(
 def _make_loop(tools: list[object] | None = None) -> tuple[AgentLoop, MessageBus]:
     bus = MessageBus()
     provider = MagicMock()
+    provider.supports_response_deltas = True
     provider.get_default_model.return_value = "test-model"
     provider.chat = AsyncMock(return_value=_make_response())
     conversation = MagicMock()

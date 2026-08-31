@@ -679,7 +679,7 @@ class DirectExecutor:
         reasoning_effort: str | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        if on_delta is not None:
+        if on_delta is not None and getattr(provider, "supports_response_deltas", False) is True:
             streaming_provider = cast(StreamingLLMProvider, provider)
             return await streaming_provider.chat(
                 messages=messages,

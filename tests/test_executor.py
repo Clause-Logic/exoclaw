@@ -40,6 +40,7 @@ class TestDirectExecutorChat:
     async def test_forwards_delta_callback_only_when_requested(self) -> None:
         executor = DirectExecutor()
         provider = MagicMock()
+        provider.supports_response_deltas = True
         provider.chat = AsyncMock(return_value=MagicMock())
 
         async def on_delta(_: str) -> None:
@@ -48,6 +49,37 @@ class TestDirectExecutorChat:
         await executor.chat(provider, messages=[], on_delta=on_delta)
 
         assert provider.chat.call_args.kwargs["on_delta"] is on_delta
+
+    async def test_legacy_provider_falls_back_to_normal_response_when_streaming_requested(
+        self,
+    ) -> None:
+        """A channel may request deltas while its provider predates the
+        optional streaming capability; the turn must still complete."""
+        executor = DirectExecutor()
+        expected = MagicMock()
+
+        class LegacyProvider:
+            def get_default_model(self) -> str:
+                return "legacy"
+
+            async def chat(
+                self,
+                messages: list[dict[str, object]],
+                tools: list[dict[str, object]] | None = None,
+                model: str | None = None,
+                max_tokens: int = 4096,
+                temperature: float = 0.7,
+                reasoning_effort: str | None = None,
+                response_format: object | None = None,
+            ) -> MagicMock:
+                return expected
+
+        async def on_delta(_: str) -> None:
+            pass
+
+        result = await executor.chat(LegacyProvider(), messages=[], on_delta=on_delta)
+
+        assert result is expected
 
 
 class TestDirectExecutorExecuteTool:

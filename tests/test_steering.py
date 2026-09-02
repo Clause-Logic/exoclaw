@@ -28,6 +28,52 @@ def _make_loop(*, on_steer: AsyncMock) -> AgentLoop:
 
 
 class TestSteering:
+    def test_on_steer_is_appended_after_existing_positional_arguments(self) -> None:
+        """Adding steering must not shift the established constructor API."""
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        conversation = MagicMock()
+        executor = MagicMock()
+        policy = MagicMock()
+        logger = MagicMock()
+
+        async def on_context_overflow(
+            messages: list[dict[str, object]],
+        ) -> list[dict[str, object]] | None:
+            return messages
+
+        loop = AgentLoop(
+            bus,
+            provider,
+            conversation,
+            None,
+            40,
+            0.1,
+            4096,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            on_context_overflow,
+            3,
+            policy,
+            executor,
+            logger,
+        )
+
+        assert loop._on_context_overflow is on_context_overflow
+        assert loop._iteration_policy is policy
+        assert loop._executor is executor
+        assert loop._log is logger
+        assert loop._on_steer is None
+
     async def test_steer_before_tools_skips_every_unstarted_call(self) -> None:
         on_steer = AsyncMock(side_effect=[[], ["Use the local file instead."], [], []])
         loop = _make_loop(on_steer=on_steer)

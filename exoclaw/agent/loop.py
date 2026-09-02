@@ -96,12 +96,6 @@ class AgentLoop:
         # stops. Dispatched through ``executor.run_hook`` like the other
         # callbacks, so durable executors wrap it for replay safety.
         on_before_finish: Callable[[str, list[str], str], Awaitable[str | None]] | None = None,
-        # Optional steering source. The host owns inbound routing and returns
-        # newly arrived user messages for this active session. The loop drains
-        # it only at safe boundaries: before an LLM call and after a tool
-        # finishes. A non-empty result is appended as user messages and
-        # re-prompts the model in the current turn.
-        on_steer: Callable[[str], Awaitable[list[str]]] | None = None,
         # DEPRECATED — prefer ``Conversation.recover_from_overflow`` (forwarded
         # via ``Executor.recover_from_overflow``). When set, this callback is
         # tried first on ``ContextWindowExceededError`` for back-compat; new
@@ -120,6 +114,12 @@ class AgentLoop:
         iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
         logger: Any | None = None,
+        # Optional steering source. The host owns inbound routing and returns
+        # newly arrived user messages for this active session. The loop drains
+        # it at model and tool boundaries. A non-empty result is appended as
+        # user messages and re-prompts the model in the current turn.
+        # Kept last to preserve positional compatibility for existing callers.
+        on_steer: Callable[[str], Awaitable[list[str]]] | None = None,
     ) -> None:
         self.bus = bus
         self._executor: Executor = executor or DirectExecutor()

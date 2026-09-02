@@ -114,6 +114,12 @@ class AgentLoop:
         iteration_policy: IterationPolicy | None = None,
         executor: Executor | None = None,
         logger: Any | None = None,
+        # Optional steering source. The host owns inbound routing and returns
+        # newly arrived user messages for this active session. The loop drains
+        # it at model and tool boundaries. A non-empty result is appended as
+        # user messages and re-prompts the model in the current turn.
+        # Kept last to preserve positional compatibility for existing callers.
+        on_steer: Callable[[str], Awaitable[list[str]]] | None = None,
     ) -> None:
         self.bus = bus
         self._executor: Executor = executor or DirectExecutor()
@@ -132,6 +138,7 @@ class AgentLoop:
         self._on_tool_calls = on_tool_calls
         self._on_tool_result = on_tool_result
         self._on_before_finish = on_before_finish
+        self._on_steer = on_steer
         self._on_context_overflow = on_context_overflow
         if on_context_overflow is not None and _warnings is not None:
             _warnings.warn(  # pragma: no cover (micropython)
@@ -436,8 +443,76 @@ class AgentLoop:
             if prefer_append and session_id is not None:
                 await self._executor.append_message(self.conversation, session_id, msg)
 
+        async def _take_steering() -> list[str]:
+            """Drain user messages the host queued for this active turn.
+
+            The host owns the queue and its durability. Keeping the loop's
+            contract to a destructive read at explicit boundaries means an
+            in-memory channel and a durable executor can use the same core
+            behavior without the core taking a dependency on either storage
+            model.
+            """
+            if self._on_steer is None or session_id is None:
+                return []
+            try:
+                pending = await self._executor.run_hook(self._on_steer, session_id)
+            except Exception:
+                self._log.exception("steering_drain_error")
+                return []
+            if not isinstance(pending, list):
+                self._log.warning("steering_drain_invalid")
+                return []
+            messages: list[str] = []
+            for item in pending:
+                if not isinstance(item, str):
+                    self._log.warning("steering_drain_invalid")
+                    return []
+                if item:
+                    messages.append(item)
+            return messages
+
+        async def _append_steering(messages: list[str]) -> None:
+            for content in messages:
+                steering_msg: dict[str, object] = {"role": "user", "content": content}
+                self._executor.append_messages([steering_msg])
+                await _flush(steering_msg)
+            self._log.info("steering_inject", **{"steering.message_count": len(messages)})
+
+        async def _skip_steered_tools(tool_calls: list[ToolCallRequest]) -> None:
+            """Close unstarted tool calls before appending a steering message.
+
+            Providers generally require a tool result for every call in an
+            assistant tool-call message. Synthetic results preserve that
+            invariant while ensuring a new user instruction prevents work the
+            model proposed but has not yet begun.
+            """
+            for tool_call in tool_calls:
+                result = "Skipped because a new user message arrived before this tool started."
+                self._log.info(
+                    "tool_skip",
+                    **{
+                        "tool.name": tool_call.name,
+                        "tool.call_id": tool_call.id,
+                        "tool.reason": "steering",
+                    },
+                )
+                if self._on_tool_result:
+                    await self._executor.run_hook(self._on_tool_result, tool_call, result)
+                tool_msg: dict[str, object] = {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.name,
+                    "content": result,
+                }
+                self._executor.append_messages([tool_msg])
+                await _flush(tool_msg)
+
         while await self._should_continue(iteration, tools_used):
             iteration += 1
+
+            steering = await _take_steering()
+            if steering:
+                await _append_steering(steering)
 
             _include = (
                 self.conversation.active_tools()
@@ -547,7 +622,18 @@ class AgentLoop:
                 self._executor.append_messages([msg])
                 await _flush(msg)
 
-                for tool_call in response.tool_calls:
+                # A message received while the model was deciding which tools
+                # to call wins before any side effect starts. Close all of the
+                # requested calls with synthetic results, append the user input
+                # after them, and let the next LLM iteration choose anew.
+                steering = await _take_steering()
+                if steering:
+                    await _skip_steered_tools(response.tool_calls)
+                    await _append_steering(steering)
+                    continue
+
+                steered = False
+                for tool_index, tool_call in enumerate(response.tool_calls):
                     tools_used.append(tool_call.name)
                     # ``ensure_ascii`` kwarg dropped: MicroPython 1.27's
                     # ``json.dumps`` doesn't accept it. The non-ASCII
@@ -673,6 +759,14 @@ class AgentLoop:
                         k: v for k, v in tool_msg.items() if not k.startswith("_")
                     }
                     await _flush(persisted_tool_msg)
+                    steering = await _take_steering()
+                    if steering:
+                        await _skip_steered_tools(response.tool_calls[tool_index + 1 :])
+                        await _append_steering(steering)
+                        steered = True
+                        break
+                if steered:
+                    continue
             else:
                 clean = self._strip_think(response.content)
                 if response.finish_reason == "error":
@@ -686,6 +780,13 @@ class AgentLoop:
                     msg2["thinking_blocks"] = response.thinking_blocks
                 self._executor.append_messages([msg2])
                 await _flush(msg2)
+                # A steer that arrived while the final LLM response was
+                # streaming gets a fresh model iteration instead of waiting
+                # behind a completed turn.
+                steering = await _take_steering()
+                if steering:
+                    await _append_steering(steering)
+                    continue
                 # Before-finish hook: the model stopped (no tool calls). A host
                 # may decide the turn isn't really done — e.g. a required
                 # closing tool wasn't called — and return a follow-up message to

@@ -972,6 +972,161 @@ def test_on_before_finish_injects_then_ends():
     asyncio.run(_go())
 
 
+def test_on_steer_before_tools_skips_unstarted_calls():
+    """A steering message received after tool selection closes every
+    unstarted call, then re-prompts the current turn with that message."""
+
+    seen = []
+
+    async def on_steer(session_id):
+        seen.append(session_id)
+        return ["use the local file"] if len(seen) == 2 else []
+
+    class _MustNotRun:
+        name = "side_effect"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        async def execute(self, **kw):
+            raise AssertionError("steering should skip this tool")
+
+    async def _go():
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StubProvider(
+                [
+                    LLMResponse(
+                        content="calling tools",
+                        tool_calls=[
+                            ToolCallRequest(id="one", name="side_effect", arguments={}),
+                            ToolCallRequest(id="two", name="side_effect", arguments={}),
+                        ],
+                    ),
+                    LLMResponse(content="updated"),
+                ]
+            ),
+            conversation=_MemConv(),
+            tools=[_MustNotRun()],
+            on_steer=on_steer,
+        )
+        content, messages = await loop.process_turn("steer:before", "research it")
+        assert content == "updated"
+        assert [message["role"] for message in messages[-5:-1]] == [
+            "assistant",
+            "tool",
+            "tool",
+            "user",
+        ]
+        assert "Skipped because" in messages[-4]["content"]
+        assert "Skipped because" in messages[-3]["content"]
+        assert messages[-2]["content"] == "use the local file"
+
+    asyncio.run(_go())
+
+
+def test_on_steer_after_tool_skips_only_remaining_calls():
+    """Steering after a completed tool preserves its result but skips
+    sibling calls that have not started yet."""
+
+    seen = []
+
+    async def on_steer(session_id):
+        seen.append(session_id)
+        return ["stop now"] if len(seen) == 3 else []
+
+    class _Counter:
+        name = "count"
+        description = "x"
+        parameters = {"type": "object", "properties": {}}
+
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, **kw):
+            self.calls += 1
+            return "first result"
+
+    async def _go():
+        tool = _Counter()
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StubProvider(
+                [
+                    LLMResponse(
+                        content="calling tools",
+                        tool_calls=[
+                            ToolCallRequest(id="one", name="count", arguments={}),
+                            ToolCallRequest(id="two", name="count", arguments={}),
+                        ],
+                    ),
+                    LLMResponse(content="stopped"),
+                ]
+            ),
+            conversation=_MemConv(),
+            tools=[tool],
+            on_steer=on_steer,
+        )
+        content, messages = await loop.process_turn("steer:after-tool", "do it")
+        assert content == "stopped"
+        assert tool.calls == 1
+        assert [message["content"] for message in messages[-4:-1]] == [
+            "first result",
+            "Skipped because a new user message arrived before this tool started.",
+            "stop now",
+        ]
+
+    asyncio.run(_go())
+
+
+def test_on_steer_after_final_response_reprompts_turn():
+    """A message arriving while a final response is produced starts another
+    model iteration within the same turn."""
+
+    seen = []
+
+    async def on_steer(session_id):
+        seen.append(session_id)
+        return ["make it short"] if len(seen) == 2 else []
+
+    async def _go():
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StubProvider([LLMResponse(content="long"), LLMResponse(content="short")]),
+            conversation=_MemConv(),
+            on_steer=on_steer,
+        )
+        content, messages = await loop.process_turn("steer:final", "answer")
+        assert content == "short"
+        assert [message["content"] for message in messages[-3:-1]] == ["long", "make it short"]
+
+    asyncio.run(_go())
+
+
+def test_on_steer_errors_and_invalid_values_do_not_break_turn():
+    """The host-side steering source is best-effort: a bad drain leaves the
+    current turn usable rather than surfacing an unrelated error."""
+
+    seen = []
+
+    async def on_steer(session_id):
+        seen.append(session_id)
+        if len(seen) == 1:
+            raise RuntimeError("store unavailable")
+        return ["text", 1]
+
+    async def _go():
+        loop = AgentLoop(
+            bus=MessageBus(),
+            provider=_StubProvider([LLMResponse(content="done")]),
+            conversation=_MemConv(),
+            on_steer=on_steer,
+        )
+        content, _messages = await loop.process_turn("steer:error", "continue")
+        assert content == "done"
+
+    asyncio.run(_go())
+
+
 # ── lifecycle hooks (exoclaw.agent.hooks) under MicroPython ──────────────────
 
 
